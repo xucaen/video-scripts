@@ -110,10 +110,33 @@ function Get-Theme {
 
 function Get-ContrastColor {
     param([string]$hexColor)
-    # Basic logic: if background is dark, shadow is light (white/gray), and vice versa.
-    # Note: This is a simplified check.
-    if ($hexColor -match "black|dark|#000|#1|#2|#3") { return "rgba(255,255,255,0.3)" } 
-    return "rgba(0,0,0,0.4)" 
+
+    # Remove the # if present
+    $cleanHex = $hexColor.Replace("#", "")
+
+    # If it's a shorthand hex (e.g., F00), expand it (e.g., FF0000)
+    if ($cleanHex.Length -eq 3) {
+        $cleanHex = "$($cleanHex[0])$($cleanHex[0])$($cleanHex[1])$($cleanHex[1])$($cleanHex[2])$($cleanHex[2])"
+    }
+
+    # If it's not a valid 6-digit hex now, default to dark shadow
+    if ($cleanHex.Length -ne 6) { return "rgba(0,0,0,0.4)" }
+
+    # Convert Hex parts to Integers
+    $R = [Convert]::ToInt32($cleanHex.Substring(0, 2), 16)
+    $G = [Convert]::ToInt32($cleanHex.Substring(2, 2), 16)
+    $B = [Convert]::ToInt32($cleanHex.Substring(4, 2), 16)
+
+    # Calculate Perceived Brightness (0 to 255)
+    $Brightness = ($R * 0.299) + ($G * 0.587) + ($B * 0.114)
+
+    # If Brightness < 128, it's a dark background -> Use Light Shadow
+    if ($Brightness -lt 128) {
+        return "rgba(255,255,255,1)" 
+    } 
+    
+    # Otherwise, it's a light background -> Use Dark Shadow
+    return "rgba(0,0,0,1)"
 }
 
 
@@ -164,6 +187,7 @@ $Colors       = $ThemeData.Colors| Sort-Object { Get-Random }
 $ShapeColors  = $ThemeData.ShapeColors| Sort-Object { Get-Random }
 $HeaderColors = $ThemeData.HeaderColors| Sort-Object { Get-Random }
 $Shapes       = $ThemeData.Shapes| Sort-Object { Get-Random }
+$ParallaxLayers = $ThemeData.ParallaxLayers
 
 $Quadrants = @("northwest", "northeast", "southwest", "southeast")| Sort-Object { Get-Random }
 
@@ -216,6 +240,11 @@ if (![string]::IsNullOrWhiteSpace($Music) -and (Test-Path $Music)) {
     }
 }
 
+
+ 
+
+
+
 ###################################
 # --- MAIN PROCESS ---
 # Each input line becomes one full video
@@ -252,6 +281,41 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         #TODO 
         $ShadowColor = Get-ContrastColor $bg  #need the brightness to be opposite of $bg. is bg is light, make shadow dark, if bg is dark, make the shadow light
     }
+
+#######################################
+## <<< pre-render the parallax layers
+#######################################
+$ParallaxTextures = @()
+
+foreach ($layer in $ParallaxLayers) {
+
+    # 1. Determine the size based on the layer depth
+    # If your layer has a 'Size' property (e.g., 1, 2, or 3)
+    # Disk:1  approx 3x3
+    # Disk:2  approx 5x5
+    # Disk:4  approx 9x9
+    $radius = if ($layer.Size) { $layer.Size } else { 1.5 }
+
+    $pcolor=  Get-ContrastColor $bg
+
+    $file = "parallax_$($layer.Type)_$([guid]::NewGuid().ToString()).png"
+##TODO: call Get-ContrastColor on background color
+
+    & $magick `
+        -size 2048x2048 xc:black `
+        +noise Random `
+        -threshold 99% `
+        -morphology Dilate "Disk:$radius" `
+        -fill "$pcolor" `
+        -opaque white `
+        -transparent black `
+        $file
+
+    $ParallaxTextures += [PSCustomObject]@{
+    File  = $file
+    Layer = $layer
+}
+}
     
     $frames = @()
 
@@ -300,7 +364,43 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
             "canvas:$bg"
         )
 
+        ###################################
+        #  -->>> It's a parallax, you dig?
+        ###################################
 
+        foreach ($p in $ParallaxTextures) {
+
+            $file = $p.File
+            $layer = $p.Layer
+
+            $speed = Scale ($PixelsPerSecond * $layer.Speed)
+            $px = [int](($speed * $currentTime) % 2048) # 2048 matches your texture size
+            $py = [int](($speed * 0.5 * $currentTime) % 2048)
+
+            # $layerW = $Width * 2
+            # $layerH = $Height * 2
+
+            $magickArgs += "("
+           # $magickArgs += "-size", "${layerW}x${layerH}"
+           # $magickArgs += "xc:none"
+
+            $magickArgs += $file
+            $magickArgs += "-roll", "+$px+$py"
+            #CROP it to the video size so it doesn't overlap weirdly
+            $magickArgs += "-crop", "${Width}x${Height}+0+0"
+
+        # apply opacity
+            $magickArgs += "-alpha", "set"
+            $magickArgs += "-channel", "A"
+            $magickArgs += "-evaluate", "multiply", $layer.Opacity
+            $magickArgs += "+channel"
+
+            $magickArgs += ")"
+
+            $magickArgs += "-gravity", "center"
+            #$magickArgs += "-geometry", "+$px+$py"
+            $magickArgs += "-composite"
+        }
         ###################################
         # --- SHAPE LAYER ---
         # animated background geometry object (With Shadow & Oscillation)
@@ -557,12 +657,22 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         Write-Host "Success! Generated MP4: $mp4Output" -ForegroundColor Green
 
         ##call vsign.ps1
-        Publish-Video -FullName $mp4Output -Title $Title -MusicName $MusicName -artist "James Barrett"
+        $NewFile = Publish-Video -FullName $mp4Output -Title $Title -MusicName $MusicName -artist "James Barrett"
 
 
         if($LASTEXITCODE -eq 0)
         {
+            # Delete the individual frames (JPGs)
             $frames | ForEach-Object { Remove-Item $_ -ErrorAction SilentlyContinue }
+
+            # Delete the parallax textures (PNGs)
+            $ParallaxTextures | ForEach-Object { Remove-Item $_.File -ErrorAction SilentlyContinue }
+
+            ## make absolutely certain before deleting anything
+            if ((Test-Path $NewFile))
+            {
+                Remove-Item $mp4Output -ErrorAction SilentlyContinue 
+            }
         }
     }
 

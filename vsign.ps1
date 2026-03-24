@@ -42,7 +42,9 @@ function Publish-Video {
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Successfully signed: $signedFileName" -ForegroundColor Green
+        return $signedFileName
     } else {
         Write-Error "FFmpeg failed to sign the file: $Path"
+        return $null
     }
 }
