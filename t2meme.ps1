@@ -14,12 +14,21 @@ param (
     [string]$Music = "",
     [string]$voice = "",
 
+    [switch]$ShapeColorOscilate,
+    [switch]$ShapeDropShadow,
+
     ##New and improved with Themes! ;-)
    # [ValidateSet("TruthDrops", "BakedWisdom")]
     [string]$Theme = "default"
 
 )
 
+$SignScript = Join-Path $PSScriptRoot "vsign.ps1"
+. $SignScript
+if (-not (Get-Command Publish-Video -ErrorAction SilentlyContinue)) {
+    Write-Error "The file $SignScript loaded, but it doesn't contain the 'Publish-Video' function!"
+    exit
+}
 # Limit ImageMagick threading for stability/performance balance
 $env:MAGICK_THREAD_LIMIT = 8
 
@@ -99,6 +108,15 @@ function Get-Theme {
     return $themeData
 }
 
+function Get-ContrastColor {
+    param([string]$hexColor)
+    # Basic logic: if background is dark, shadow is light (white/gray), and vice versa.
+    # Note: This is a simplified check.
+    if ($hexColor -match "black|dark|#000|#1|#2|#3") { return "rgba(255,255,255,0.3)" } 
+    return "rgba(0,0,0,0.4)" 
+}
+
+
 ###################################
 # --- Design Constants (Base Canvas Units) ---
 # These are defined in original 1080x1920 design space
@@ -139,13 +157,15 @@ $OutputDir = "."
 
 $ThemeData = Get-Theme $Theme
 $FontColor    = $ThemeData.TextColors
-$FontPairs    = $ThemeData.FontPairs
-$Colors       = $ThemeData.Colors
-$ShapeColors  = $ThemeData.ShapeColors
-$HeaderColors = $ThemeData.HeaderColors
-$Shapes       = $ThemeData.Shapes
 
-$Quadrants = @("northwest", "northeast", "southwest", "southeast")
+
+$FontPairs    = $ThemeData.FontPairs| Sort-Object { Get-Random }
+$Colors       = $ThemeData.Colors| Sort-Object { Get-Random }
+$ShapeColors  = $ThemeData.ShapeColors| Sort-Object { Get-Random }
+$HeaderColors = $ThemeData.HeaderColors| Sort-Object { Get-Random }
+$Shapes       = $ThemeData.Shapes| Sort-Object { Get-Random }
+
+$Quadrants = @("northwest", "northeast", "southwest", "southeast")| Sort-Object { Get-Random }
 
 ###################################
 # --- Input Validation ---
@@ -207,17 +227,32 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
     if ($line -eq "") { continue }
     $count++
 
-    # Randomized visual identity per line (consistent across all frames of that line)
-    $SelectedPair = Get-Random $FontPairs
-    $headerFont = Protect-MagickText $SelectedPair.Header
-    $bodyFont   = Protect-MagickText $SelectedPair.Body
+    # Calculate index based on current line count to loop through arrays
+    # Using modulo (%) ensures we never go out of bounds
+    $idxFont   = ($count - 1) % $FontPairs.Count
+    $idxColor  = ($count - 1) % $Colors.Count
+    $idxHColor = ($count - 1) % $HeaderColors.Count
+    $idxShape  = ($count - 1) % $Shapes.Count
+    $idxSCol   = ($count - 1) % $ShapeColors.Count
+    $idxQuad   = ($count - 1) % $Quadrants.Count
 
-    $headerColor = Get-Random $HeaderColors
-    $bg          = Get-Random $Colors
-    $grav        = Get-Random $Quadrants
-    $shape       = Get-Random $Shapes
-    $scol        = Get-Random $ShapeColors
+    # Select distinct elements
+    $SelectedPair = $FontPairs[$idxFont]
+    $headerFont   = Protect-MagickText $SelectedPair.Header
+    $bodyFont     = Protect-MagickText $SelectedPair.Body
 
+    $headerColor  = $HeaderColors[$idxHColor]
+    $bg           = $Colors[$idxColor]
+    $grav         = $Quadrants[$idxQuad]
+    $shape        = $Shapes[$idxShape]
+    $scol         = $ShapeColors[$idxSCol]
+
+    if($ShapeDropShadow)
+    {
+        #TODO 
+        $ShadowColor = Get-ContrastColor $bg  #need the brightness to be opposite of $bg. is bg is light, make shadow dark, if bg is dark, make the shadow light
+    }
+    
     $frames = @()
 
 
@@ -245,8 +280,8 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         $headerOffset  = $HPPS * $currentTime
 
         # shape scaling (slight growth over time for subtle motion)
-        $scaleFactor = 0.95 + ([Math]::Min(0.05, ($currentTime * 0.01)))
-        $resizePercent = [int]($scaleFactor * 100)
+        #$scaleFactor = 0.95 + ([Math]::Min(0.05, ($currentTime * 0.01)))
+        #$resizePercent = [int]($scaleFactor * 100)
 
         # fade-in opacity curve
         $opacity = [Math]::Min(1.0, ($currentTime / $TargetFadeSeconds))
@@ -268,8 +303,10 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
 
         ###################################
         # --- SHAPE LAYER ---
-        # animated background geometry object
+        # animated background geometry object (With Shadow & Oscillation)
         ###################################
+
+        
         $geometry = "+$currentOffset+0"#basic init
         switch ($grav) {
             "northwest" { $geometry = "+$currentOffset+$currentOffset" } # Moves Right and Down
@@ -284,6 +321,33 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         $offsetX = ($shapeLayerW / 2) - 500
         $offsetY = ($shapeLayerH / 2) - 500
 
+
+        # 2. Render Shadow (if enabled)
+        if ($ShapeDropShadow) {
+            $magickArgs += "("
+            $magickArgs += "-size", "${shapeLayerW}x${shapeLayerH}"
+            $magickArgs += "xc:none"
+            $magickArgs += "-fill", $ShadowColor
+            $magickArgs += "-gravity", "center"
+            # Offset the shadow slightly (Scale 15-20 pixels)
+            $sOff = Scale 20
+            $magickArgs += "-draw", "translate $($offsetX + $sOff),$($offsetY + $sOff) $shape"
+           
+            
+            #opacity
+            $magickArgs += "-alpha", "set"
+            $magickArgs += "-channel", "A"
+            $magickArgs += "-evaluate", "multiply", $opacity
+            $magickArgs += "+channel"
+            $magickArgs += ")"
+
+            $magickArgs += "-gravity", "center"
+            $magickArgs += "-geometry", $geometry
+            $magickArgs += "-composite"
+        }
+
+
+        ###render primary shape
         $magickArgs += "("
         $magickArgs += "-size", "${shapeLayerW}x${shapeLayerH}"#make the shape canvas bigger
         $magickArgs += "xc:none"
@@ -302,6 +366,7 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         $magickArgs += "-gravity", "center" # centers the shape canvas on the image
         $magickArgs += "-geometry", $geometry #I do not know what this does
         $magickArgs += "-composite"
+
         ###################################
         # --- TEXT PROCESSING ---
         # split header/body if ":" exists
@@ -389,10 +454,10 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         Write-Host "ScaleX=$ScaleX ScaleY=$ScaleY Scale=$Scale"
 
         Write-Host "FONT CHECK:"
-Test-Path $headerFont
-Test-Path $bodyFont
+        Test-Path $headerFont
+        Test-Path $bodyFont
 
-Write-Host "FontColor is: $FontColor"
+        Write-Host "FontColor is: $FontColor"
 
         ###################################
         # --- FINAL FRAME OUTPUT ---
@@ -492,25 +557,7 @@ Write-Host "FontColor is: $FontColor"
         Write-Host "Success! Generated MP4: $mp4Output" -ForegroundColor Green
 
         ##call vsign.ps1
-        $Title = "Untitled."
-        $ScriptPath="C:\PROJECTS\POWERSHELL\VIDEO SCRIPTS\"
-
-        if (-not [string]::IsNullOrWhiteSpace($headerText))
-        {
-            $Title = $headerText 
-        }
-        
-        $MusicName = ""
-        if ($hasAudio -and $CurrentMusic) {
-            $MusicName = [System.IO.Path]::GetFileNameWithoutExtension($CurrentMusic)
-        }
-
-        $ThirdParty = if ($MusicName) { "YouTube Audio Library - $MusicName" } else { "Yours Truly most likely" }
-
-        & "$ScriptPath\vsign.ps1" `
-        -Path $mp4Output `
-        -Title $Title `
-        -ThirdParty $ThirdParty
+        Publish-Video -FullName $mp4Output -Title $Title -MusicName $MusicName -artist "James Barrett"
 
 
         if($LASTEXITCODE -eq 0)

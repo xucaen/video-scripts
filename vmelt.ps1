@@ -34,12 +34,19 @@ param(
     [Alias("r")]
     [switch]$Random,
 
+    #passthru for Publish-Video
+    [string]$Title,
 
     # Help System.
     [Alias("?", "h")]
     [switch]$Help
 )
-
+$SignScript = Join-Path $PSScriptRoot "vsign.ps1"
+. $SignScript
+if (-not (Get-Command Publish-Video -ErrorAction SilentlyContinue)) {
+    Write-Error "The file $SignScript loaded, but it doesn't contain the 'Publish-Video' function!"
+    exit
+}
 # --- HELP DISPLAY ---
 if ($Help) {
     Write-Host @"
@@ -279,9 +286,9 @@ foreach ($file in $manifests) {
 
     $meltArgs += "-silent"
 
-    $process = Start-Process $melt -ArgumentList $meltArgs -Wait -NoNewWindow -PassThru
+    & $melt -ArgumentList $meltArgs -Wait -NoNewWindow -PassThru
 
-    if ($process.ExitCode -ne 0) {
+    if ($LASTEXITCODE -ne 0) {
         Write-Host "MELT had a meltdown. " -ForegroundColor RED -BackgroundColor White
         write-Host "---------`$meltArgs---------------" -ForegroundColor GREEN -BackgroundColor BLACK
         write-Host "$meltArgs" -ForegroundColor GREEN -BackgroundColor BLACK
@@ -290,12 +297,16 @@ foreach ($file in $manifests) {
     }
 
     $ffmpegArgs = "-i temp.mkv -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$outputName`""
-    $process = Start-Process $ffmpeg -ArgumentList $ffmpegArgs -Wait -NoNewWindow -PassThru
+    & $ffmpeg -ArgumentList $ffmpegArgs -Wait -NoNewWindow -PassThru
 
-    if ($process.ExitCode -ne 0) {
+    if ($LASTEXITCODE -ne 0) {
         Write-Host "FFMPEG failed. " -ForegroundColor Magenta -BackgroundColor White
         exit 5
     }
+
+     ##call vsign.ps1
+        Publish-Video -FullName $outputName -Title $Title -artist "James Barrett"
+
 }
 
 Write-Host "`nALL DONE! Check your final_output files." -ForegroundColor Green
