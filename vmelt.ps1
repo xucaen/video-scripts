@@ -41,8 +41,18 @@ param(
     [Alias("?", "h")]
     [switch]$Help
 )
+
+
+########################################
+## "include" files
+########################################
+
 $SignScript = Join-Path $PSScriptRoot "vsign.ps1"
 . $SignScript
+
+$VprobeScript = Join-Path $PSScriptRoot "vprobe.ps1"
+. $VprobeScript
+
 if (-not (Get-Command Publish-Video -ErrorAction SilentlyContinue)) {
     Write-Error "The file $SignScript loaded, but it doesn't contain the 'Publish-Video' function!"
     exit
@@ -96,7 +106,7 @@ function Shuffle {
 # --- SETTINGS & INITIALIZATION ---
 $melt = "melt.exe"
 $ffmpeg = "ffmpeg.exe"
-$ffprobe = "ffprobe.exe"
+$vprobe = "C:/PROJECTS/POWERSHELL/VIDEO SCRIPTS/vprobe.ps1"
 $transitionDur = $TransitionDuration
 $transitionTyp = $TransitionType
 
@@ -179,17 +189,36 @@ Read-Host "Edit .txt files if needed, then Press Enter to begin encoding"
 # --- MAIN ENCODING LOOP (MELT IMPLEMENTATION) ---
 $manifests = Get-ChildItem "batch_*.txt" | Sort-Object Name
 
-# Convert transition duration (seconds -> frames)
-$fps = 60
-$mixFrames = [int]($transitionDur * $fps)
-
-$trimFrames = [int]($TrimFront * $fps)
-
 # Path to the luma assets based on your directory listing
 $lumaRepo = "C:\\Program Files\\kdenlive\\bin\\data\\kdenlive\\lumas\\HD"
+
+
+#############################
+# --- MAIN LOOP ---
+##############################
 foreach ($file in $manifests) {
     $inputFiles = Get-Content $file.FullName
     if ($inputFiles.Count -eq 0) { continue }
+
+   # Convert transition duration (seconds -> frames)
+    # --- 1. PROBE FIRST CLIP FOR FPS ---
+    $firstClip = $inputFiles[0]
+    $fps = Get-VideoFPS -FilePath $firstClip
+
+            
+        if (-$fps -eq 0) {
+            Write-Host "Could not detect FPS for $firstClip, defaulting to 30" -ForegroundColor Yellow
+            $fps = 30
+        }
+        
+    
+    # Round to nearest whole number for the Melt Profile name if needed, 
+    # but keep the decimal for frame math.
+    $roundedFps = [Math]::Round($fps)
+    Write-Host "Detected FPS: $fps (Using $roundedFps for Profile)" -ForegroundColor Cyan
+
+    $mixFrames = [int]($transitionDur * $fps)  
+    $trimFrames = [int]($TrimFront * $fps)
 
     $batchNum = $file.Name.Replace("batch_","").Replace(".txt","")
     $outputName = "final_output_$batchNum.mp4"
@@ -286,9 +315,10 @@ foreach ($file in $manifests) {
 
     $meltArgs += "-silent"
 
-    & $melt -ArgumentList $meltArgs -Wait -NoNewWindow -PassThru
 
-    if ($LASTEXITCODE -ne 0) {
+    $meltProcess = Start-Process -FilePath $melt -ArgumentList $meltArgs -Wait -NoNewWindow -PassThru
+
+    if ($meltProcess.ExitCode -ne 0) {
         Write-Host "MELT had a meltdown. " -ForegroundColor RED -BackgroundColor White
         write-Host "---------`$meltArgs---------------" -ForegroundColor GREEN -BackgroundColor BLACK
         write-Host "$meltArgs" -ForegroundColor GREEN -BackgroundColor BLACK
@@ -297,9 +327,10 @@ foreach ($file in $manifests) {
     }
 
     $ffmpegArgs = "-i temp.mkv -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$outputName`""
-    & $ffmpeg -ArgumentList $ffmpegArgs -Wait -NoNewWindow -PassThru
 
-    if ($LASTEXITCODE -ne 0) {
+    $ffmpegProcess = Start-Process -FilePath $ffmpeg -ArgumentList $ffmpegArgs -Wait -NoNewWindow -PassThru
+
+    if ($ffmpegProcess.ExitCode -ne 0) {
         Write-Host "FFMPEG failed. " -ForegroundColor Magenta -BackgroundColor White
         exit 5
     }
