@@ -17,6 +17,9 @@ param (
     [switch]$ShapeColorOscilate,
     [switch]$ShapeDropShadow,
 
+    [switch]$Rotate,
+
+
     ##New and improved with Themes! ;-)
    # [ValidateSet("TruthDrops", "BakedWisdom")]
     [string]$Theme = "default"
@@ -162,7 +165,10 @@ $Design = @{
 
 [int]$PPS  = Scale $PixelsPerSecond
 [int]$HPPS = Scale $HeaderPixelsPerSecond
-
+[int]$RotateMin = 5
+[int]$RotateMax = 10
+[double]$RotateSpeedFactor = 1.0
+[int]$RotateDegrees = Get-Random -Maximum $RotateMax -Minimum $RotateMin
 
 ###################################
 # --- External Tools ---
@@ -289,34 +295,38 @@ $ParallaxTextures = @()
 
 foreach ($layer in $ParallaxLayers) {
 
-    # 1. Determine the size based on the layer depth
-    # If your layer has a 'Size' property (e.g., 1, 2, or 3)
-    # Disk:1  approx 3x3
-    # Disk:2  approx 5x5
-    # Disk:4  approx 9x9
-    $radius = if ($layer.Size) { $layer.Size } else { 1.5 }
+        # 1. Determine the size based on the layer depth
+        # If your layer has a 'Size' property (e.g., 1, 2, or 3)
+        # Disk:1  approx 3x3
+        # Disk:2  approx 5x5
+        # Disk:4  approx 9x9
+        $radius = if ($layer.Size) { $layer.Size } else { 1.5 }
 
-    $pcolor=  Get-ContrastColor $bg
+        $pcolor=  Get-ContrastColor $bg
 
-    $file = "parallax_$($layer.Type)_$([guid]::NewGuid().ToString()).png"
-##TODO: call Get-ContrastColor on background color
+        $file = "parallax_$($layer.Type)_$([guid]::NewGuid().ToString()).png"
+    ##TODO: call Get-ContrastColor on background color
 
-    & $magick `
-        -size 2048x2048 xc:black `
-        +noise Random `
-        -threshold 99% `
-        -morphology Dilate "Disk:$radius" `
-        -fill "$pcolor" `
-        -opaque white `
-        -transparent black `
-        $file
+        & $magick `
+            -size 2048x2048 xc:black `
+            +noise Random `
+            -threshold 99% `
+            -morphology Dilate "Disk:$radius" `
+            -fill "$pcolor" `
+            -opaque white `
+            -transparent black `
+            $file
 
-    $ParallaxTextures += [PSCustomObject]@{
-    File  = $file
-    Layer = $layer
-}
+        $ParallaxTextures += [PSCustomObject]@{
+        File  = $file
+        Layer = $layer
+    }
 }
     
+    $CurrentRotationSpeed = 0
+    if ($Rotate) {
+        $CurrentRotationSpeed = [double](Get-Random -Minimum $RotateMin -Maximum $RotateMax) * $RotateSpeedFactor
+    }
     $frames = @()
 
 
@@ -433,7 +443,15 @@ foreach ($layer in $ParallaxLayers) {
             $sOff = Scale 20
             $magickArgs += "-draw", "translate $($offsetX + $sOff),$($offsetY + $sOff) $shape"
            
-            
+            # --- INSERT ROTATION HERE ---
+        if ($Rotate) {
+            $currentDegrees = $CurrentRotationSpeed * $currentTime
+            $cx = $shapeLayerW / 2
+            $cy = $shapeLayerH / 2
+            # Syntax: CenterX,CenterY Scale Angle
+            $magickArgs += "-distort", "ScaleRotateTranslate", "$cx,$cy 1 $currentDegrees"
+        }
+        # ----------------------------
             #opacity
             $magickArgs += "-alpha", "set"
             $magickArgs += "-channel", "A"
@@ -455,6 +473,16 @@ foreach ($layer in $ParallaxLayers) {
         $magickArgs += "-gravity", "center"#center the shape on the canvas
         $magickArgs += "-draw", "translate $offsetX,$offsetY $shape"
         #$magickArgs += "-resize", "$resizePercent%"
+
+        # --- INSERT ROTATION HERE ---
+        if ($Rotate) {
+            $currentDegrees = $CurrentRotationSpeed * $currentTime
+            $cx = $shapeLayerW / 2
+            $cy = $shapeLayerH / 2
+            # Syntax: CenterX,CenterY Scale Angle
+            $magickArgs += "-distort", "ScaleRotateTranslate", "$cx,$cy 1 $currentDegrees"
+        }
+        # ----------------------------
 
         # opacity
         $magickArgs += "-alpha", "set"
@@ -558,6 +586,13 @@ foreach ($layer in $ParallaxLayers) {
         Test-Path $bodyFont
 
         Write-Host "FontColor is: $FontColor"
+
+        Write-Host "------ Rotation Check: -------"
+        Write-Host "Rotate on? $Rotate";
+        Write-Host "Rotation Degrees: $RotateDegrees";
+        Write-Host "Rotation Speed: $CurrentRotationSpeed";
+
+        
 
         ###################################
         # --- FINAL FRAME OUTPUT ---
