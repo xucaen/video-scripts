@@ -263,6 +263,8 @@ foreach ($file in $manifests) {
 
         if ($i -gt 0) {
 
+            if($isOutro){ continue }
+
             switch ($transitionTyp) {
 
                 "mix" {
