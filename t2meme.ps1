@@ -1,56 +1,28 @@
 param (
     [string]$InputFile = "input.txt",
-    [int]$FPS = 30,
-    [int]$DesiredLengthInSeconds = 15,
-
-    [int]$PixelsPerSecond = 50,
-    [int]$HeaderPixelsPerSecond = 5,
-
-    [int]$Width  = 1080,
-    [int]$Height = 1920,
-
-    [string]$Music = "",
-    [string]$voice = "",
-
-    [switch]$ShapeColorOscilate,
-    [switch]$ShapeDropShadow,
-    [switch]$Rotate,
-
-    [string]$Theme = "default"
+    [int]$Width  = 1440,
+    [int]$Height = 1080,
+    [string]$Theme = "default",
+    [int]$ShapeCount = 11,
+    [int]$ShapeLayers = 11
 )
-$env:FFREPORT = "file=ffmpeg_crash_log.txt:level=32"
+
 $env:FONTCONFIG_FILE = "nul"
 $env:FONTCONFIG_PATH = "nul"
 $env:HOME = $PSScriptRoot
-# Scaling Constants
-[double]$BaseWidth  = 1080.00
-[double]$BaseHeight = 1920.00
-[double]$ScaleX = 1.0 * $Width / $BaseWidth
-[double]$ScaleY = 1.0 * $Height / $BaseHeight
-[double]$Scale = [Math]::Max(0.1, [Math]::Min($ScaleX, $ScaleY))
 
-
-# External Scripts & Tools
-$SignScript = Join-Path $PSScriptRoot "vsign.ps1"
-$shapeScript = Join-Path $PSScriptRoot "pre-render_shapes.ps1"
-$ffmpeg = "ffmpeg.exe"
+# External Tools & Paths
 $magick = "magick.exe"
 $OutputDir = "."
 
-. $SignScript
-
-# Design Constants
-$Design = @{
-    HeaderY    = 150    # pixels from top for header
-    BodyY      = 600    # pixels from top for body
-    SpacerW    = 900    # keep this if using a bounding box or max width
-    HeaderSize = 90     # font size for header
-    BodySize   = 80     # font size for body
+# Design Layout Constants optimized for 1440x1080 (4:3)
+$Layout = @{
+    HeaderY    = 120     # Pixels from top for header
+    BodyY      = 380     # Pixels from top for body text
+    SpacerW    = 1240    # Content bounding width
+    HeaderSize = 75      # Font size for header
+    BodySize   = 55      # Font size for body
 }
-
-# Parallax Motion (Scaled)
-[int]$PPS  = $PixelsPerSecond
-[int]$HPPS = $HeaderPixelsPerSecond
 
 # Theme Loading
 function Get-Theme {
@@ -61,22 +33,154 @@ function Get-Theme {
     return & $themePath 
 }
 
-
-
-$ThemeData = Get-Theme $Theme
+# Initialize Theme Data
+$ThemeData    = Get-Theme $Theme
 $FontPairs    = $ThemeData.FontPairs | Sort-Object { Get-Random }
 $Colors       = $ThemeData.Colors | Sort-Object { Get-Random }
 $ShapeColors  = $ThemeData.ShapeColors | Sort-Object { Get-Random }
 $HeaderColors = $ThemeData.HeaderColors | Sort-Object { Get-Random }
-
-# Music Setup
-$MusicFiles = @()
-$MusicIndex = 0
-if (![string]::IsNullOrWhiteSpace($Music) -and (Test-Path $Music)) {
-    $MusicFiles = Get-ChildItem -Path $Music -File | Where-Object { $_.Extension -match '\.(mp3|wav|m4a|aac|flac)$' } | Sort-Object { Get-Random }
-}
+$Shapes       = $ThemeData.Shapes | Sort-Object { Get-Random }
+$FontColor    = $ThemeData.TextColors
 
 $count = 0
+
+
+function Make-Shape-Layer {
+    param(
+        [double]$BlurFactor,
+        [double]$SizeFactor
+    )
+
+    $TempShapeFile = [System.IO.Path]::GetTempFileName() + ".png"
+
+
+
+    $ThemeCanvasSize = 1000
+    $ScaledCanvasSizeX   = $ThemeCanvasSize / 2
+    $ScaledCanvasSizeY    = $ThemeCanvasSize / 2
+
+
+    $scaleX = ($SizeFactor / $ScaledCanvasSizeX)
+    $scaleY = ($SizeFactor / $ScaledCanvasSizeY)
+
+    $lastColor = $null
+
+    $centerX = $Width / 2
+    $centerY = $Height / 2
+    $goldenAngle = 137.5 * [Math]::PI / 180  # Convert 137.5 degrees to Radians
+    $spreadConstant = 500    
+
+    # 1. Start a new isolated layer group so we can transform it together
+    $shapeArgs = @(
+        "(", 
+        "-size", "${Width}x${Height}", 
+        "canvas:none"
+    )
+
+
+    for ($i = $ShapeCount; $i -ge 0; $i--){
+
+        # Select a random color distinct from previous
+        $availableColors = $ShapeColors | Where-Object { $_ -ne $lastColor }
+        $lastColor = $availableColors | Get-Random
+
+        $themeShape = $Shapes | Get-Random
+
+        # Golden Ratio positioning
+        $radius = $spreadConstant * [Math]::Sqrt($i)
+        $angle  = $i * $goldenAngle
+
+        $translateX = $centerX + ($radius * [Math]::Cos($angle))
+        $translateY = $centerY + ($radius * [Math]::Sin($angle))
+
+        # 2. Each shape gets the same size calculation using the SizeFactor knob
+        $shapeScaleX = $scaleX
+        $shapeScaleY = $scaleY
+
+        # Build clean drawing command (Removed the individual 'rotate' from here)
+        $scaledDrawCmd = "push graphic-context translate $translateX,$translateY scale $shapeScaleX,$shapeScaleY translate -$ScaledCanvasSizeX,-$ScaledCanvasSizeY $themeShape pop graphic-context"
+
+
+        # --- CHANGE 2: INJECT BLUR INTO THE ARGUMENTS ---
+        # Add shape to our transparent layer list with the blur applied before the fill/draw
+        $shapeArgs += @(
+            "-fill", $lastColor,
+            "-draw", $scaledDrawCmd
+        )
+        
+    }
+
+    # 3. After ALL shapes are made, apply the same blur to the whole layer
+    if ($BlurFactor -gt 0) {
+        $shapeArgs += @("-blur", "0x$BlurFactor")
+    }
+
+
+
+    # Close the layer group and merge (composite) it over the background
+    $shapeArgs += @(
+        ")"
+    )
+
+    # Add output file destination
+    $shapeArgs += $TempShapeFile
+
+    # Run the compact shape generation parameters natively
+    & $magick "-monitor" $shapeArgs
+    return $TempShapeFile
+}
+
+
+function Make-Text-Layer {
+    param(
+        [string]$HeaderColor,
+        [string]$HeaderFont,
+        [string]$HeaderText,
+        [string]$BodyFont,
+        [string]$BodyText
+    )
+
+    $TempTextFile = [System.IO.Path]::GetTempFileName() + ".png"
+
+    $textArgs = @(
+        "-size", "${Width}x${Height}", 
+        "canvas:none",
+        
+        # --- Header Layer ---
+        "(",
+            "-background", "none",
+            "-fill", $HeaderColor,
+            "-font", $HeaderFont,
+            "-pointsize", $Layout.HeaderSize,
+            "-size", "$($Layout.SpacerW)x${Height}",
+            "caption:$HeaderText",
+        ")",
+        "-gravity", "north",
+        "-geometry", "+0+$($Layout.HeaderY)",
+        "-composite",
+
+        # --- Body Text Layer ---
+        "(",
+            "-background", "none",
+            "-fill", $FontColor,
+            "-font", $BodyFont,
+            "-pointsize", $Layout.BodySize,
+            "-size", "$($Layout.SpacerW)x${Height}",
+            "caption:$BodyText",
+        ")",
+        "-gravity", "north",
+        "-geometry", "+0+$($Layout.BodyY)",
+        "-composite",
+
+        $TempTextFile
+    )
+
+    & $magick "-monitor" $textArgs
+    return $TempTextFile
+}
+
+
+
 
 ###################################
 # --- MAIN PROCESS ---
@@ -87,48 +191,20 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
     if ($line -eq "") { continue }
     $count++
 
-    # Selection Logic
+    # Selection Logic per line
     $idxFont   = ($count - 1) % $FontPairs.Count
     $idxColor  = ($count - 1) % $Colors.Count
     $idxHColor = ($count - 1) % $HeaderColors.Count
-    $idxSCol   = ($count - 1) % $ShapeColors.Count
 
-    # --- REVISED PATH ESCAPING ---
     $SelectedPair = $FontPairs[$idxFont]
-
-    $headerFont = $SelectedPair.Header 
-    $bodyFont   = $SelectedPair.Body   
+    $headerFont   = $SelectedPair.Header 
+    $bodyFont     = $SelectedPair.Body   
 
     $headerColor  = $HeaderColors[$idxHColor]
     $bg           = $Colors[$idxColor]
-    $scol         = $ShapeColors[$idxSCol]
-    $FontColor    = $ThemeData.TextColors # Assuming single value or pick logic
+  
 
-    # --- STEP 1: RENDER BACKGROUND SHAPES ---
-    Write-Host "Rendering shape background..." -ForegroundColor Cyan
-    & $shapeScript `
-        -FPS $FPS `
-        -DesiredLengthInSeconds $DesiredLengthInSeconds `
-        -Width $Width `
-        -Height $Height `
-        -ShapeDropShadow:$ShapeDropShadow `
-        -Rotate:$Rotate `
-        -Theme $Theme `
-        -ShapeColor $scol `
-        -BackgroundColor $bg
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Background render failed with exit code $LASTEXITCODE"
-        exit $LASTEXITCODE
-    }
-
-    $shapeVideo = "shape_.mp4"
-    if (!(Test-Path $shapeVideo)) { 
-        Write-Error "CRITICAL: $shapeVideo was not created by the shape script."
-        exit 1 
-    }
-
-    # --- STEP 2: TEXT PARSING ---
+    # --- TEXT PARSING ---
     $headerText = ""
     $bodyText = $line
     if ($line -like "*:*") {
@@ -137,131 +213,54 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         $bodyText   = $parts[1].Trim()
     }
 
-    # --- STEP 3: PERSIST TEXT (Avoids escaping hell) ---
+    # Final Output Image Path
+    $OutputFile = Join-Path $OutputDir ("img_{0:D3}.png" -f $count)
+
+    Write-Host "Processing Line $count Generating Image..." -ForegroundColor Cyan
 
 
-    # --- STEP 4: CALCULATE DIMENSIONS ---
-    $headerFontSize = $Design.HeaderSize
-    $bodyFontSize   = $Design.BodySize
+# Your initial starting parameters
+    [double]$blur   = 30.0
+    [double]$size   = 500.0
+
+    $TextImg = Make-Text-Layer -HeaderColor $headerColor -HeaderFont $headerFont -HeaderText $headerText -BodyFont $bodyFont -BodyText $bodyText
 
 
-# --- STEP 5: make the text frame ---
-# Ensure fontsize uses the variables, not the (w-text_w) formula
-Write-Host "DEBUG: HeaderSize: $headerFontSize, BodySize: $bodyFontSize, FontColor: $FontColor" -ForegroundColor Magenta
-Write-Host "DEBUG: HeaderFont: $headerFont, BodyFont: $bodyFont" -ForegroundColor Magenta
-$TextFrameFile = "temptext.png"
-
-
-#########################################
-### ImageMagick step ---
-#########################################
-
-$magickArgs = @(
-    "-size", "${BaseWidth}x${BaseHeight}",
-    "canvas:none",
-
-    # --- Header ---
-    "(",
-        "-background", "none",
-        "-fill", $headerColor,
-        "-font", $headerFont,
-        "-pointsize", $Design.HeaderSize,
-        "-size", "$($BaseWidth - 100)x${BaseHeight}",
-        "caption:$headerText",
-    ")",
-    "-gravity", "north",
-    "-geometry", "+0+$($Design.HeaderY)",
-    "-composite",
-
-    # --- Body ---
-    "(",
-        "(", "-size", "${Design.SpacerW}x60", "canvas:none", ")",
-        "(",
-            "-background", "none",
-            "-fill", $FontColor,
-            "-font", $bodyFont,
-            "-pointsize", $Design.BodySize,
-            "-size", "$($BaseWidth - 100)x${BaseHeight}",
-            "caption:$bodyText",
-        ")",
-        "-append",
-    ")",
-    "-gravity", "north",
-    "-geometry", "+0+$($Design.BodyY)",
-    "-composite", $TextFrameFile
-)
-
-# Execute
-& $magick $magickArgs
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "ImageMagick failed with exit code $LASTEXITCODE"
-    exit $LASTEXITCODE
-} else {
-    Write-Host "Frame created: $TextFrameFile" -ForegroundColor Green
-}
-
-#######DEBUG CODE
-
-Write-Host ""
-Write-Host "DEBUG: filer is: $filter" -ForegroundColor Blue -BackgroundColor White
-Write-Host ""
-
-          # --- STEP 6: AUDIO ---
-    $audioArgs = @()
-    $hasAudio = $false
-    if ($MusicFiles.Count -gt 0) {
-        $CurrentMusic = $MusicFiles[$MusicIndex].FullName
-        $audioArgs = @("-stream_loop", "-1", "-i", $CurrentMusic)
-        $hasAudio = $true
-        $MusicIndex = ($MusicIndex + 1) % $MusicFiles.Count
-    }
-
-    # --- STEP 7: FINAL RENDER ---
-    $mp4Output = Join-Path $OutputDir ("img_{0:D3}.mp4" -f $count)
-
-    $ffmpegArgs = @(
-    "-y",
-    "-i", $shapeVideo,   # background video
-    "-i", $TextFrameFile   # rendered text frame
+    #########################################
+    ### ImageMagick Generation Pass
+    #########################################
+    $magickArgs = @(
+        "-monitor",
+        "-size", "${Width}x${Height}",
+        "canvas:$bg"
     )
 
-
-    if ($hasAudio) { $ffmpegArgs += $audioArgs }
-
-$ffmpegArgs += @(
-    "-filter_complex", "[0:v][1:v]overlay=0:0[v]",
-    "-map", "[v]",
-    "-c:v", "libx264",
-    "-pix_fmt", "yuv420p",
-    "-t", $DesiredLengthInSeconds
-)
-
-    if ($hasAudio) {
-        $ffmpegArgs += "-map", "2:a:0"
-        $ffmpegArgs += "-shortest"
-    }
-
-    $ffmpegArgs += @("-movflags", "+faststart", "-g", ($FPS * 2), $mp4Output)
-
-    Write-Host "Rendering final video: $mp4Output" -ForegroundColor Yellow
-    & $ffmpeg $ffmpegArgs
-
-    if (!(Test-Path $mp4Output)) {
-        Write-Error "FFmpeg reported success, but $mp4Output is missing!"
-        exit 1
-    }
-    # --- STEP 8: PUBLISH & CLEANUP ---
-    if (Test-Path $mp4Output) {
-        $NewFile = Publish-Video -FullName $mp4Output -Title "Video $count" -artist "James Barrett"
+    $LayerFiles = @()
+    for ($i = 0; $i -lt $ShapeLayers; $i++) {
         
-        if ($null -eq $NewFile -or !(Test-Path $NewFile)) {
-                Write-Error "Publish-Video failed to return a valid path. Keeping original files for safety."
-                exit 1
-            }
+       
+        [double]$ratio = if ($ShapeLayers -gt 1) { [double]$i / ([double]$ShapeLayers - 1.0) } else { 0.1 }
 
-            # Only cleanup if we reach this point safely
-            Remove-Item $mp4Output, $shapeVideo, $TextFrameFile -ErrorAction SilentlyContinue
-            Write-Host "Process for line $count complete.`n" -ForegroundColor Gray
+        # 2. Blur decreases from 10 down to 0
+        $currentBlur = [Math]::Max(0.1, ($blur * (1 - $ratio)))
+
+        # 3. Size decreases but NEVER goes below 1
+        $currentSize = [Math]::Max(10.0, ($size - (($size - 10.0) * $ratio)))
+
+           # 5. Call the function using your exact, dynamically scaling values
+        $LayerFiles += Make-Shape-Layer -BlurFactor $currentBlur -SizeFactor $currentSize
     }
+
+
+        $finalArgs = @()
+        $finalArgs += $magickArgs
+
+        foreach ($layer in $LayerFiles) {
+            $finalArgs += @($layer, "-composite")
+        }
+
+        $finalArgs += @($TextImg, "-composite", $OutputFile)
+
+        & $magick "-monitor" $finalArgs
+        
 }
