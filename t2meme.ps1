@@ -1,54 +1,23 @@
 param (
     [string]$InputFile = "input.txt",
-    [int]$Width  = 1440,
+    [int]$Width  = 1080,
     [int]$Height = 1080,
-    [string]$Theme = "default",
-    [int]$ShapeCount = 11,
-    [int]$ShapeLayers = 11
+    [string]$Theme = "CyberPastel",
+    [int]$ShapeLayers = 11,
+    [ValidateSet("golden", "starfield")]
+    [string]$SpreadAlgorithm = "golden"    
 )
 
 $env:FONTCONFIG_FILE = "nul"
 $env:FONTCONFIG_PATH = "nul"
 $env:HOME = $PSScriptRoot
 
-# External Tools & Paths
-$magick = "magick.exe"
-$OutputDir = "."
-
-# Design Layout Constants optimized for 1440x1080 (4:3)
-$Layout = @{
-    HeaderY    = 120     # Pixels from top for header
-    BodyY      = 380     # Pixels from top for body text
-    SpacerW    = 1240    # Content bounding width
-    HeaderSize = 75      # Font size for header
-    BodySize   = 55      # Font size for body
-}
-
-# Theme Loading
-function Get-Theme {
-    param([string]$ThemeName)
-    $localThemeFolder = Join-Path (Get-Location).Path "themes"
-    $themePath = Join-Path $localThemeFolder "$ThemeName.ps1"
-    if (!(Test-Path $themePath)) { throw "Theme not found: $ThemeName" }
-    return & $themePath 
-}
-
-# Initialize Theme Data
-$ThemeData    = Get-Theme $Theme
-$FontPairs    = $ThemeData.FontPairs | Sort-Object { Get-Random }
-$Colors       = $ThemeData.Colors | Sort-Object { Get-Random }
-$ShapeColors  = $ThemeData.ShapeColors | Sort-Object { Get-Random }
-$HeaderColors = $ThemeData.HeaderColors | Sort-Object { Get-Random }
-$Shapes       = $ThemeData.Shapes | Sort-Object { Get-Random }
-$FontColor    = $ThemeData.TextColors
-
-$count = 0
-
-
 function Make-Shape-Layer {
     param(
         [double]$BlurFactor,
-        [double]$SizeFactor
+        [double]$SizeFactor,
+        [int]$ShapeCount,
+        [object]$Algorithm
     )
 
     $TempShapeFile = [System.IO.Path]::GetTempFileName() + ".png"
@@ -65,10 +34,7 @@ function Make-Shape-Layer {
 
     $lastColor = $null
 
-    $centerX = $Width / 2
-    $centerY = $Height / 2
-    $goldenAngle = 137.5 * [Math]::PI / 180  # Convert 137.5 degrees to Radians
-    $spreadConstant = 500    
+    # 1. Jitter the Center Point (Shift by +/- 5% of canvas size)
 
     # 1. Start a new isolated layer group so we can transform it together
     $shapeArgs = @(
@@ -80,34 +46,44 @@ function Make-Shape-Layer {
 
     for ($i = $ShapeCount; $i -ge 0; $i--){
 
+
+
         # Select a random color distinct from previous
         $availableColors = $ShapeColors | Where-Object { $_ -ne $lastColor }
         $lastColor = $availableColors | Get-Random
 
         $themeShape = $Shapes | Get-Random
 
-        # Golden Ratio positioning
-        $radius = $spreadConstant * [Math]::Sqrt($i)
-        $angle  = $i * $goldenAngle
-
-        $translateX = $centerX + ($radius * [Math]::Cos($angle))
-        $translateY = $centerY + ($radius * [Math]::Sin($angle))
-
         # 2. Each shape gets the same size calculation using the SizeFactor knob
         $shapeScaleX = $scaleX
         $shapeScaleY = $scaleY
 
+        # --- CREATE THE ANONYMOUS OBJECT PAYLOAD ---
+        $algoContext = [PSCustomObject]@{
+            Index          = $i
+            Width          = $Width
+            Height         = $Height
+            CenterX        = $Width / 2
+            CenterY        = $Height / 2
+            SpreadConstant = Get-Random -Minimum 500 -Maximum 1000
+        }
+
+        $coords = & $ChosenAlgo.Func $algoContext
+
         # Build clean drawing command (Removed the individual 'rotate' from here)
-        $scaledDrawCmd = "push graphic-context translate $translateX,$translateY scale $shapeScaleX,$shapeScaleY translate -$ScaledCanvasSizeX,-$ScaledCanvasSizeY $themeShape pop graphic-context"
+        $scaledDrawCmd = "push graphic-context translate $($coords.X),$($coords.Y) scale $shapeScaleX,$shapeScaleY translate -$ScaledCanvasSizeX,-$ScaledCanvasSizeY $themeShape pop graphic-context"
 
+        # --- ADDED STROKE SETTINGS ---
+        $borderColor = "black"  # Or use a hex code like "#1a1a1a"
+        $borderWidth = 3         # Thickness in pixels
 
-        # --- CHANGE 2: INJECT BLUR INTO THE ARGUMENTS ---
-        # Add shape to our transparent layer list with the blur applied before the fill/draw
+        # Add shape to our transparent layer list with fill, stroke, and draw
         $shapeArgs += @(
             "-fill", $lastColor,
+            "-stroke", $borderColor,
+            "-strokewidth", $borderWidth,
             "-draw", $scaledDrawCmd
         )
-        
     }
 
     # 3. After ALL shapes are made, apply the same blur to the whole layer
@@ -181,6 +157,82 @@ function Make-Text-Layer {
 
 
 
+function Init-Theme-Data {
+    return [PSCustomObject]@{
+        Theme_Name    = $Themes.Name
+        Font_Pairs    = [PSCustomObject]@{ Header = $Themes.HeaderFont; Body = $Themes.BodyFont }
+        Background_Colors   = $Themes.Background 
+        Shape_Colors  = $Themes.Shapes
+        Header_Colors = $Themes.Headers | Sort-Object { Get-Random }
+        Font_Color    = $Themes.Text
+    }
+}
+# Theme Loading
+function Get-Theme {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ThemeName
+    )
+
+    $localThemeFolder = Join-Path (Get-Location).Path "themes"
+    $themePath = Join-Path $localThemeFolder "$ThemeName.ps1"
+
+    if (!(Test-Path $themePath)) { 
+        throw "Theme file not found at: $themePath" 
+    }
+
+    # Read the file content as a single continuous string
+    $rawText = Get-Content -Path $themePath -Raw
+
+    # Evaluate the string directly into a native PowerShell HashTable object
+    $themeData = Invoke-Expression $rawText
+
+    return $themeData
+}
+
+# External Tools & Paths
+$magick = "magick.exe"
+$OutputDir = "."
+
+# Design Layout Constants optimized for 1440x1080 (4:3)
+$Layout = @{
+    HeaderY    = 90     # Pixels from top for header
+    BodyY      = 285     # Pixels from top for body text
+    SpacerW    = 930    # Content bounding width
+    HeaderSize = 56      # Font size for header
+    BodySize   = 41      # Font size for body
+}
+
+
+# Initialize Theme Data
+$Theme_file_name = "theme2"
+$ThemeData    = Get-Theme $Theme_file_name
+$Shapes       = $ThemeData.Shapes | Sort-Object { Get-Random }
+$AlgorithmRegistry = $ThemeData.AlgorithmRegistry
+$ChosenAlgo = $AlgorithmRegistry[$SpreadAlgorithm]
+Write-Host "Running generation using: $($ChosenAlgo.Name)" -ForegroundColor Yellow
+
+
+if ($Theme.ToLower() -eq "random"){
+    $Themes = $ThemeData.Themes.Values | Get-Random
+}
+else {
+        #TODO: ensure $Theme is a valid index first
+    $Themes = $ThemeData.Themes[$Theme]
+}
+
+$data = Init-Theme-Data
+$ThemeName    =       $data.Theme_Name            
+$FontPairs    =       $data.Font_Pairs    
+$Background   =       $data.Background_Colors
+$ShapeColors  =       $data.Shape_Colors  
+$HeaderColors =       $data.Header_Colors 
+$FontColor    =       $data.Font_Color    
+####end init theme data
+
+$count = 0
+$FilenameID = 1
+
 
 ###################################
 # --- MAIN PROCESS ---
@@ -191,18 +243,34 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
     if ($line -eq "") { continue }
     $count++
 
+    #TODO: if $Theme == "random" then call InitThemeData
+    if ($Theme.ToLower() -eq "random") {
+        $Themes = $ThemeData.Themes.Values | Get-Random
+        $data = Init-Theme-Data
+        $ThemeName    =       $data.Theme_Name            
+        $FontPairs    =       $data.Font_Pairs    
+        $Background   =       $data.Background_Colors
+        $ShapeColors  =       $data.Shape_Colors  
+        $HeaderColors =       $data.Header_Colors 
+        $FontColor    =       $data.Font_Color 
+
+        Write-Host "Choosing a new theme: " $ThemeName -ForegroundColor Red -BackgroundColor Cyan
+    }
+
     # Selection Logic per line
-    $idxFont   = ($count - 1) % $FontPairs.Count
-    $idxColor  = ($count - 1) % $Colors.Count
-    $idxHColor = ($count - 1) % $HeaderColors.Count
+    # Safe checks if property is a collection/array or a single string
+    $bgCount = $Background.Count
+    $hcCount = $HeaderColors.Count
 
-    $SelectedPair = $FontPairs[$idxFont]
-    $headerFont   = $SelectedPair.Header 
-    $bodyFont     = $SelectedPair.Body   
+    $idxColor  = ($count - 1) % $bgCount
+    $idxHColor = ($count - 1) % $hcCount
 
-    $headerColor  = $HeaderColors[$idxHColor]
-    $bg           = $Colors[$idxColor]
-  
+    $headerFont   = $FontPairs.Header 
+    $bodyFont     = $FontPairs.Body   
+
+    $headerColor  = $HeaderColors[$idxHColor] 
+    $bg           = $Background[$idxColor]
+
 
     # --- TEXT PARSING ---
     $headerText = ""
@@ -214,15 +282,12 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
     }
 
     # Final Output Image Path
-    $OutputFile = Join-Path $OutputDir ("img_{0:D3}.png" -f $count)
+    $OutputFile = Join-Path $OutputDir ("img_{0:D3}_{1}.png" -f $FilenameID++, $ThemeName)
 
     Write-Host "Processing Line $count Generating Image..." -ForegroundColor Cyan
 
 
-# Your initial starting parameters
-    [double]$blur   = 30.0
-    [double]$size   = 500.0
-
+    # Your initial starting parameters
     $TextImg = Make-Text-Layer -HeaderColor $headerColor -HeaderFont $headerFont -HeaderText $headerText -BodyFont $bodyFont -BodyText $bodyText
 
 
@@ -238,17 +303,22 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
     $LayerFiles = @()
     for ($i = 0; $i -lt $ShapeLayers; $i++) {
         
+        [double]$blur   = Get-Random -Minimum 10 -Maximum 30
+        [double]$size   = Get-Random -Minimum 10 -Maximum 250
+        [int]$shape_count = Get-Random -Minimum 5 -Maximum 55
+
        
         [double]$ratio = if ($ShapeLayers -gt 1) { [double]$i / ([double]$ShapeLayers - 1.0) } else { 0.1 }
 
         # 2. Blur decreases from 10 down to 0
-        $currentBlur = [Math]::Max(0.1, ($blur * (1 - $ratio)))
+        $currentBlur = [Math]::Max(0.0, ($blur * (1 - $ratio)))
 
         # 3. Size decreases but NEVER goes below 1
         $currentSize = [Math]::Max(10.0, ($size - (($size - 10.0) * $ratio)))
 
-           # 5. Call the function using your exact, dynamically scaling values
-        $LayerFiles += Make-Shape-Layer -BlurFactor $currentBlur -SizeFactor $currentSize
+
+        # 5. Call the function using your exact, dynamically scaling values
+        $LayerFiles += Make-Shape-Layer -BlurFactor $currentBlur -SizeFactor $currentSize -ShapeCount $shape_count
     }
 
 

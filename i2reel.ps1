@@ -29,7 +29,7 @@ $OutputDir = "."
 $MusicFiles = @()
 $MusicIndex = 0
 if (![string]::IsNullOrWhiteSpace($Music) -and (Test-Path $Music)) {
-    $MusicFiles = Get-ChildItem -Path $Music -File | Where-Object { $_.Extension -match '\.(mp3|wav|m4a|aac|flac)$' } | Sort-Object { Get-Random }
+    $MusicFiles = Get-ChildItem -Path $Music -File -Recurse | Where-Object { $_.Extension -match '\.(mp3|wav|m4a|aac|flac)$' } | Sort-Object { Get-Random }
 }
 
 # --- STEP 1: GET ALL IMAGE FILES IN CURRENT DIRECTORY ---
@@ -76,7 +76,7 @@ foreach ($SourceImage in $ImageFiles) {
     }
 
     # --- STEP 5: FINAL RENDER ---
-    $mp4Output = Join-Path $OutputDir ("img_{0:D3}.mp4" -f $count)
+    $mp4Output = Join-Path $OutputDir ("img_{0:D3}_{1}.mp4" -f $count, $SourceImage.BaseName)
 
     $totalframes = $FPS * $DesiredLengthInSeconds
 
