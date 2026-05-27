@@ -65,7 +65,7 @@ function Make-Shape-Layer {
             Height         = $Height
             CenterX        = $Width / 2
             CenterY        = $Height / 2
-            SpreadConstant = Get-Random -Minimum 500 -Maximum 1000
+            SpreadConstant = Get-Random -Minimum 45 -Maximum 250
         }
 
         $coords = & $ChosenAlgo.Func $algoContext
@@ -231,8 +231,6 @@ $FontColor    =       $data.Font_Color
 ####end init theme data
 
 $count = 0
-$FilenameID = 1
-
 
 ###################################
 # --- MAIN PROCESS ---
@@ -281,8 +279,13 @@ Get-Content $InputFile -Encoding UTF8 | ForEach-Object {
         $bodyText   = $parts[1].Trim()
     }
 
-    # Final Output Image Path
-    $OutputFile = Join-Path $OutputDir ("img_{0:D3}_{1}.png" -f $FilenameID++, $ThemeName)
+    # Final Output Image Path (do not overwrite existing files)
+    do
+    {
+        $FilenameID = (Get-Date).ToString("yyyyMMdd_HHmmssff")
+        $OutputFile = Join-Path $OutputDir ("img_{0}_{1}.png" -f $ThemeName, $FilenameID )
+    }
+    while ([System.IO.File]::Exists($OutputFile))
 
     Write-Host "Processing Line $count Generating Image..." -ForegroundColor Cyan
 

@@ -13,7 +13,7 @@ param(
     #   luma  = smooth fade using luma blending
     #   wipe  = wipe-style transition (basic luma wipe)
     [Alias("t")]
-    [ValidateSet("mix","luma","wipeh", "wipev")]
+    [ValidateSet("mix","luma","wipeh", "wipev", "cut")]
     [string]$TransitionType = "mix",
 
     # Path to Intro video
@@ -205,13 +205,7 @@ foreach ($file in $manifests) {
     $firstClip = $inputFiles[0]
     $fps = Get-VideoFPS -FilePath $firstClip
 
-            
-        if (-$fps -eq 0) {
-            Write-Host "Could not detect FPS for $firstClip, defaulting to 30" -ForegroundColor Yellow
-            $fps = 30
-        }
-        
-    
+   
     # Round to nearest whole number for the Melt Profile name if needed, 
     # but keep the decimal for frame math.
     $roundedFps = [Math]::Round($fps)
@@ -267,6 +261,9 @@ foreach ($file in $manifests) {
 
             switch ($transitionTyp) {
 
+                "cut" {
+                    #do nothing, just pass thru the clip
+                }
                 "mix" {
                     # Standard dissolve
                     $meltArgs += "-mix"
@@ -338,7 +335,11 @@ foreach ($file in $manifests) {
     }
 
      ##call vsign.ps1
-        Publish-Video -FullName $outputName -Title $Title -artist "James Barrett"
+     $signedFileName = Publish-Video -FullName $outputName -Title $Title -artist "James Barrett"
+        # Check if the signed file exists using Test-Path
+        if (Test-Path -Path $signedFileName){
+            Remove-Item -Path $outputName
+        }
 
 }
 

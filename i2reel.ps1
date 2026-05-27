@@ -90,12 +90,13 @@ foreach ($SourceImage in $ImageFiles) {
 
     [double]$Speed = 3.0         
     [double]$zoomFactor = 0.0001
-    [double]$VectorX = 1.0  
-    [double]$VectorY = 0.5  
+    # Calculate absolute pixel focal points based on the actual image width and height
+    [double]$VectorX = Get-Random -Minimum 5 -Maximum ([int]($ImgWidth))
+    [double]$VectorY = Get-Random -Minimum 5 -Maximum ([int]($ImgHeight ))
 
-    # 2. Pure CPU filter chain: Zoompan processes the frames, then scale handles the pixel blending.
-    # No memory swapping ensures FFmpeg will never crash or corrupt the MP4 container.
-    $zoompanfilter = "zoompan=z='1.0+(on*$Speed*$zoomFactor)':x='iw/2-(iw/zoom/2)+(on*$Speed*$VectorX)':y='ih/2-(ih/zoom/2)+(on*$Speed*$VectorY)':d=1:s=${ImgWidth}x${ImgHeight}:fps=$FPS,scale=${ImgWidth}:${ImgHeight}:flags=bicubic"
+    Write-Host "Chosen Zoom Focal Point: X=$VectorX, Y=$VectorY" -ForegroundColor Cyan
+
+    $zoompanfilter = "zoompan=z='1.0+(on*$Speed*$zoomFactor)':x='$VectorX*(1-1/zoom)':y='$VectorY*(1-1/zoom)':d=1:s=${ImgWidth}x${ImgHeight}:fps=$FPS,scale=${ImgWidth}:${ImgHeight}:flags=bicubic"
 
     # 3. Use NVENC for the actual encoding step. 
     # Leaving the video encoding to your GPU saves massive amounts of overhead, pushing you back up to top speed.
@@ -123,19 +124,13 @@ foreach ($SourceImage in $ImageFiles) {
         $mp4Output
     )
 
-Write-Host "Rendering final video: $mp4Output" -ForegroundColor Yellow
-& $ffmpeg $ffmpegArgs
+    Write-Host "Rendering final video: $mp4Output" -ForegroundColor Yellow
+    & $ffmpeg $ffmpegArgs
 
-if (!(Test-Path $mp4Output)) {
-    Write-Error "FFmpeg reported success, but $mp4Output is missing!"
-    exit 1
-}
-
-
-
-
-
-
+    if (!(Test-Path $mp4Output)) {
+        Write-Error "FFmpeg reported success, but $mp4Output is missing!"
+        exit 1
+    }
 
 
 
