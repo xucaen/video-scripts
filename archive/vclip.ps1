@@ -1,6 +1,16 @@
 param(
     [Alias("i")]
-    [string]$ListFile
+    [string]$ListFile,
+    [Alias("a")]
+    [int]$AudioTrack = 1,
+    [Alias("db")]
+    [int]$DecibleThreshold = -30,
+    [Alias("l")]
+    [double]$MinClipLength = 3.0,
+    [Alias("sl")]
+    [double]$SilenceLength = 1.5
+
+
 )
 
 # --- INITIALIZATION ---
@@ -18,10 +28,26 @@ if (Test-Path $VprobeScript) {
 
 
 function Detect-Silence {
+    param(
+        [int]$AudioTrack,
+        [int]$DecibleThreshold,
+        [double]$SilenceLength
+    )
+
+    ###Write a nicely formatted statemt showing the values for params
+    # --- PARAMETER STATUS DISPLAY ---
+    Write-Host "`n--------------------------------------------------" -ForegroundColor Cyan
+    Write-Host " [Detect-Silence Configuration]" -ForegroundColor Cyan
+    Write-Host "  -> Target Audio Track   : " -NoNewline; Write-Host "$AudioTrack" -ForegroundColor Yellow
+    Write-Host "  -> Volume Threshold     : " -NoNewline; Write-Host "${DecibleThreshold} dB" -ForegroundColor Yellow
+    Write-Host "  -> Min Silence Duration : " -NoNewline; Write-Host "$SilenceLength seconds" -ForegroundColor Yellow
+    Write-Host "  -> Target Clip Length   : " -NoNewline; Write-Host "$MinClipLength seconds." -ForegroundColor Yellow
+    Write-Host "--------------------------------------------------" -ForegroundColor Cyan
+
 
     # --- CONFIGURATION FOR SILENCE DETECTION ---
-    $NoiseThreshold = "-30"
-    $MinDuration    = "0.5"
+    $NoiseThreshold = $DecibleThreshold
+    $MinDuration    = $SilenceLength
     $VideoExtensions = @(".mp4", ".mkv", ".mov", ".avi") # Add any other extensions you use
 
     # 1. Get all video files in the current folder, sorted by creation date (ascending)
@@ -58,7 +84,7 @@ function Detect-Silence {
         # Define the arguments, check voice on track 2
         $FfmpegArgs = @(
             "-i", $InputVideo,
-            "-filter_complex", "[0:a:1]silencedetect=noise=${NoiseThreshold}dB:d=$MinDuration",
+            "-filter_complex", "[0:a:${AudioTrack}]silencedetect=noise=${NoiseThreshold}dB:d=${MinDuration}",
             "-f", "null", 
             "-"
         )
@@ -76,26 +102,41 @@ function Detect-Silence {
         foreach ($Match in $SilenceMatches) {
             if ($Match.Groups['start'].Success) {
                 $SilenceStart = [double]$Match.Groups['start'].Value
-                
+
                 if ($SilenceStart -gt $CurrentStart) {
-                    $LocalClips.Add([PSCustomObject]@{
-                        File  = $InputVideo
-                        Start = [string][Math]::Round($CurrentStart, 2)
-                        End   = [string][Math]::Round($SilenceStart, 2)
-                    })
+                    # No padding applied
+                    $ClipStart = $CurrentStart
+                    $ClipEnd = $SilenceStart
+
+                    # Only keep the clip if it is a minimum of 3 seconds long
+                    if (($ClipEnd - $ClipStart) -ge $MinClipLength) {
+                        $LocalClips.Add([PSCustomObject]@{
+                            File  = $InputVideo
+                            Start = [string][Math]::Round($ClipStart, 2)
+                            End   = [string][Math]::Round($ClipEnd, 2)
+                        })
+                    }
                 }
-            } elseif ($Match.Groups['end'].Success) {
+            }
+            elseif ($Match.Groups['end'].Success) {
                 $CurrentStart = [double]$Match.Groups['end'].Value
             }
         }
 
         # Catch trailing voice clip
         if ($CurrentStart -lt $TotalDuration) {
-            $LocalClips.Add([PSCustomObject]@{
-                File  = $InputVideo
-                Start = [string][Math]::Round($CurrentStart, 2)
-                End   = [string][Math]::Round($TotalDuration, 2)
-            })
+            # No padding applied
+            $ClipStart = $CurrentStart
+            $ClipEnd = $TotalDuration
+
+            # Only keep the clip if it is a minimum of 3 seconds long
+            if (($ClipEnd - $ClipStart) -ge $MinClipLength) {
+                $LocalClips.Add([PSCustomObject]@{
+                    File  = $InputVideo
+                    Start = [string][Math]::Round($ClipStart, 2)
+                    End   = [string][Math]::Round($ClipEnd, 2)
+                })
+            }
         }
 
         if ($LocalClips.Count -eq 0) {
@@ -109,7 +150,6 @@ function Detect-Silence {
     return $AllClips
 
 } #end Detect-Silence
-
 
 if ($ListFile) {
     if (-not (Test-Path $ListFile)) {
@@ -127,7 +167,7 @@ if ($ListFile) {
     }
 }
 else {
-    $Clips = Detect-Silence
+    $Clips = Detect-Silence -AudioTrack $AudioTrack -DecibleThreshold $DecibleThreshold -SilenceLength $SilenceLength
 }
 
 if ($null -eq $Clips -or $Clips.Count -eq 0) {
@@ -161,8 +201,14 @@ foreach ($Row in $Clips) {
             Write-Warning "Skipping micro-clip range ($frameStart to $frameEnd) because it's too short to render safely."
             continue
         }
-        
-        $OutputFile = "Clip_{0:d3}_{1}" -f $ClipNumber, (Get-Item $InputFile).Name
+       
+        $Item = Get-Item $InputFile
+        $BaseName = $Item.BaseName
+        $Extension = $Item.Extension
+
+        $PaddedNumber = $ClipNumber.ToString("000")
+
+        $OutputFile = "${BaseName}_Clip_${PaddedNumber}${Extension}"
 
         Write-Host "`n--- Processing Clip #$ClipNumber ---" -ForegroundColor Cyan
         Write-Host "Source: $InputFile ($fps fps)"

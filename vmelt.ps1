@@ -24,18 +24,26 @@ param(
     [Alias("u")]
     [string]$Outro,
 
+    #path to overlay video
+    ### the overlay will be laid on top of the final output
+    [Alias("ov")]
+    [string]$Overlay,
+
     #number of seconds to cut off the front of the clip
     ###### Do NOT cut off the front of the Intro or Outro ######
     [Alias("tf")]
     [int]$TrimFront = 0,
 
+
     #randomize the order of clips to be joined
-    #ignore if chunksize < 2
     [Alias("r")]
     [switch]$Random,
 
     #passthru for Publish-Video
     [string]$Title,
+
+    [ValidateSet("name","timestamp")]
+    [string]$SortBy = "name",
 
     # Help System.
     [Alias("?", "h")]
@@ -102,26 +110,103 @@ function Shuffle {
    return $List | Get-Random -Count $List.Count
 }
 
+function Get-FFMpegArgs {
+    param(
+        [string]$Overlay,
+        [string]$OutputName,
+        [string]$FFprobePath
+    )
+
+    $overlayPath = if ($Overlay) { (Get-Item $Overlay).FullName } else { $null }
+    $ffmpegArgs = $null
+
+    if ($overlayPath) {
+        Write-Host "Calculating video durations for overlay placement..." -ForegroundColor Cyan
+
+        # Step 1: Safely fetch the total duration of your merged temp video
+        $tempDurationOutput = & $FFprobePath -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 temp.mkv
+        [double]$tempDuration = [double]$tempDurationOutput
+
+        # Step 2: Safely fetch the total duration of the overlay asset
+        $overlayDurationOutput = & $FFprobePath -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$overlayPath"
+        [double]$overlayDuration = [double]$overlayDurationOutput
+
+        # Step 3: Compute the exact start timestamp 
+        $startAtSecond = $tempDuration - $overlayDuration
+
+        Write-Host "Overlay will push forward and start at: $startAtSecond seconds." -ForegroundColor Yellow
+
+        # Step 4: Key out the black background ('0x000000') before the overlay step
+        $ffmpegArgs = "-i temp.mkv -i `"$overlayPath`" -filter_complex `"[1:v] chromakey=0x000000:0.1:0.1,setpts=PTS+$startAtSecond/TB [ovtrk]; [0:v][ovtrk] overlay=0:0:enable='gte(t,$startAtSecond)'`" -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$OutputName`""
+    } 
+    else {
+        $ffmpegArgs = "-i temp.mkv -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$OutputName`""
+    }
+
+    return $ffmpegArgs
+}
+
+function Get-Sorted-List {
+    [CmdletBinding()]
+    param (
+        [string]$SortBy 
+    )
+
+    ### Identify raw clips
+    $rawFiles = Get-ChildItem -Path (Get-Location) -File | Where-Object {
+        ($_.Extension -eq ".mp4" -or $_.Extension -eq ".mkv") -and
+        ($_.Name -notmatch "final_output") -and ($_.Name -notmatch "temp") -and
+        ($_.DirectoryName -notmatch "_vmelt_temp")
+    }
+
+    # Regex pattern for (yyyy-MM-dd_hh-mm-ss) allowing space or underscore
+    $timestampPattern = '\d{4}-\d{2}-\d{2}[ _]\d{2}-\d{2}-\d{2}'
+
+    if ($SortBy -eq "timestamp") {
+        # Check if ANY file is missing the timestamp
+        foreach ($file in $rawFiles) {
+            if ($file.Name -notmatch $timestampPattern) {
+                Write-Error "Error: The file '$($file.Name)' does not contain a valid timestamp (yyyy-MM-dd_hh-mm-ss)."
+                return $null 
+            }
+        }
+
+        # Sort with a tie-breaker: Primary = normalized timestamp, Secondary = natural filename sort
+        $rawFiles | Sort-Object { 
+            if ($_.Name -match $timestampPattern) { 
+                # Replace space/underscore with a generic dash so they string-compare perfectly
+                $_.Name -match $timestampPattern | Out-Null
+                $Matches[0] -replace '[ _]', '-' 
+            } 
+        }, { 
+            # Secondary tie-breaker: natural sort padding logic for the suffix (Clip_001, zoom, etc.)
+            [regex]::Replace($_.Name, '\d+', { $args.Value.PadLeft(20, '0') }) 
+        }
+    }
+    else {
+        # Default: Sort by Name (using natural sort padding logic) and output
+        $rawFiles | Sort-Object { [regex]::Replace($_.Name, '\d+', { $args.Value.PadLeft(20, '0') }) }
+    }
+}
 
 # --- SETTINGS & INITIALIZATION ---
 $melt = "melt.exe"
 $ffmpeg = "ffmpeg.exe"
-$vprobe = "C:/PROJECTS/POWERSHELL/VIDEO SCRIPTS/vprobe.ps1"
-$transitionDur = $TransitionDuration
+$ffprobe = "ffprobe.exe"
+[double]$transitionDur = $TransitionDuration
 $transitionTyp = $TransitionType
 
 ### Validate Intro/Outro paths if provided
 if ($Intro -and !(Test-Path $Intro)) { Write-Host "Intro file not found: $Intro" -ForegroundColor Red; exit 1}
 if ($Outro -and !(Test-Path $Outro)) { Write-Host "Outro file not found: $Outro" -ForegroundColor Red; exit 2}
+if ($Overlay -and !(Test-Path $Overlay)) { Write-Host "Overlay file not found: $Overlay" -ForegroundColor Red; exit 2}
+
 
 
 
 ### Identify raw clips
-$sourceFiles = Get-ChildItem -Path (Get-Location) -File | Where-Object {
-    ($_.Extension -eq ".mp4" -or $_.Extension -eq ".mkv") -and
-    ($_.Name -notmatch "final_output") -and ($_.Name -notmatch "temp") -and
-    ($_.DirectoryName -notmatch "_vmelt_temp")
-} | Sort-Object { [regex]::Replace($_.Name,'\d+',{ $args.Value.PadLeft(20,'0') }) }
+$sourceFiles = Get-Sorted-List -SortBy $SortBy
+
 
 $totalClips = $sourceFiles.Count
 if ($totalClips -eq 0) { 
@@ -144,7 +229,7 @@ if ($ChunkSize -le 0) {
 ### Use source files directly (no normalization)
 #if $Random is on, shuffle these $sourceFiles into a randomized order
 #ignore $Random if chunksize < 2
-if ($Random -and ($ChunkSize -gt 1))
+if ($Random)
 {
     #shuffle these $sourceFiles into a randomized order and place into $normalizedFiles
    $normalizedFiles = Shuffle($sourceFiles)
@@ -182,8 +267,12 @@ for ($b = 0; $b -lt $numBatches; $b++) {
 Write-Host "`n--- QUEUE READY FOR INSPECTION ---" -ForegroundColor Cyan
 Get-ChildItem -Path "batch_*.txt" | Select-Object -Property Name
 
-
-Write-Host "`nTransition: $transitionTyp ($($transitionDur)s)" -ForegroundColor Yellow
+[double]$displayDur = $transitionDur;
+if($transitionTyp -eq "cut")
+{
+    $displayDur = 0.0
+}
+Write-Host "`nTransition: $transitionTyp ($($displayDur)s)" -ForegroundColor Yellow
 Read-Host "Edit .txt files if needed, then Press Enter to begin encoding"
 
 # --- MAIN ENCODING LOOP (MELT IMPLEMENTATION) ---
@@ -215,9 +304,6 @@ foreach ($file in $manifests) {
     $trimFrames = [int]($TrimFront * $fps)
 
     $batchNum = $file.Name.Replace("batch_","").Replace(".txt","")
-    $outputName = "final_output_$batchNum.mp4"
-
-    Write-Host "Encoding batch $batchNum to $outputName using MELT..." -ForegroundColor Yellow
 
     ################################################################
     # MELT TIMELINE BUILD
@@ -325,10 +411,19 @@ foreach ($file in $manifests) {
         exit 4
     }
 
-    $ffmpegArgs = "-i temp.mkv -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$outputName`""
+
+
+    $outputName = "final_output_$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss')).mp4"
+    Write-Host "Encoding batch $batchNum to $outputName using MELT..." -ForegroundColor Yellow
+    
+    $ffmpegArgs = Get-FFMpegArgs -Overlay $Overlay -OutputName $outputName -FFprobePath $ffprobe
 
     $ffmpegProcess = Start-Process -FilePath $ffmpeg -ArgumentList $ffmpegArgs -Wait -NoNewWindow -PassThru
 
+
+
+    ###########################################################################################################
+    
     if ($ffmpegProcess.ExitCode -ne 0) {
         Write-Host "FFMPEG failed. " -ForegroundColor Magenta -BackgroundColor White
         exit 5
