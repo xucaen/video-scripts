@@ -1,7 +1,7 @@
 param(
-    # Number of clips per output file. 0 merges everything into one.
-    [Alias("c")]
-    [int]$ChunkSize = 0,
+    # Time ceiling in seconds per output file. 0 merges everything into one.
+    [Alias("s")]
+    [double]$MaxBatchDurationSeconds = 15.0,
 
     # Transition Duration in seconds.
     [Alias("d")]
@@ -18,38 +18,23 @@ param(
 
     # Path to Intro video
     [Alias("i")]
-    [string]$Intro,
+    [string]$IntroPath,
 
     # Path to Outro video
     [Alias("u")]
-    [string]$Outro,
+    [string]$OutroPath,
 
-    #path to overlay video
-    ### the overlay will be laid on top of the final output
-    [Alias("ov")]
-    [string]$Overlay,
-
-    #number of seconds to cut off the front of the clip
-    ###### Do NOT cut off the front of the Intro or Outro ######
-    [Alias("tf")]
-    [int]$TrimFront = 0,
-
-
-    #randomize the order of clips to be joined
+    # randomize the order of clips to be joined
     [Alias("r")]
     [switch]$Random,
 
-    #passthru for Publish-Video
+    # passthru for Publish-Video
     [string]$Title,
 
     [ValidateSet("name","timestamp")]
-    [string]$SortBy = "name",
+    [string]$SortBy = "name"
 
-    # Help System.
-    [Alias("?", "h")]
-    [switch]$Help
 )
-
 
 ########################################
 ## "include" files
@@ -65,83 +50,86 @@ if (-not (Get-Command Publish-Video -ErrorAction SilentlyContinue)) {
     Write-Error "The file $SignScript loaded, but it doesn't contain the 'Publish-Video' function!"
     exit
 }
-# --- HELP DISPLAY ---
-if ($Help) {
-    Write-Host @"
 
-VMELT.PS1 - Video Merge Utility with Transitions (MELT Edition)
---------------------------------------------------
-Merges video clips in the current directory using melt (MLT framework).
 
-USAGE:
-  .\vmelt.ps1 [-c ChunkSize] [-d Duration] [-t Transition type] [-?]
+[switch]$FullClip = $false
 
-PARAMETERS:
-  -c, -chunksize  Number of clips per output file. 
-                  (Default: 0 - Merges all clips into one file)
-
-  -d, -duration   Duration of the transition in seconds.
-                  (Default: 0.5)
-
-  -t, -transition Type of transition.
-                  Options: mix, luma, wipeh, wipev.
-                  (Default: mix)
-
-  -tf, -trimfront number of seconds to cut off the front of the clip
-                    Does NOT cut off the front of the Intro or Outro
-                  (default: 0)
-
-   -r, -random    Randomize the order of clips to be joined
-                  Note: Is ignored if chunksize < 2
-    
-  -?, -help       Displays this help message.
-
-EXAMPLES:
-  .\vmelt -c 5 -d 1.0 -t luma
-  .\vmelt -?
-
-"@ -ForegroundColor White
-    exit 0
-}
+########################################
+## Helper Functions
+########################################
 
 function Shuffle {
-    param($List )
-   #shuffle the order of $list and return the shuffled list
-   return $List | Get-Random -Count $List.Count
+    param($List)
+    return $List | Get-Random -Count $List.Count
+}
+
+function Get-ClipDuration {
+    param([string]$FilePath)
+
+    $out = & $ffprobe -v error -show_entries format=duration `
+        -of default=noprint_wrappers=1:nokey=1 "$FilePath"
+
+    return [double]$out
+}
+
+function Build-TimeBatches {
+    param(
+        [array]$Files,
+        [double]$MaxSeconds,
+        [switch]$full_clip
+    )
+
+    $batches = @()
+    $currentBatch = @()
+    $currentTime = 0.0
+
+        if($full_clip) 
+        {
+           $batches += ,$Files
+            return ,$batches
+            
+        }
+
+    foreach ($file in $Files) {
+        $duration = Get-ClipDuration -FilePath $file.FullName
+
+
+        # Edge case: single clip longer than max
+        if ($duration -ge $MaxSeconds -and $currentBatch.Count -eq 0) {
+            $batches += ,@($file)
+            continue
+        }
+
+        # If adding this clip exceeds limit -> flush batch
+        if (($currentTime + $duration) -gt $MaxSeconds -and $currentBatch.Count -gt 0) {
+            $batches += ,$currentBatch
+            $currentBatch = @()
+            $currentTime = 0.0
+        }
+
+        $currentBatch += $file
+        $currentTime += $duration
+    }
+
+    # Flush remaining
+    if ($currentBatch.Count -gt 0) {
+        $batches += ,$currentBatch
+    }
+
+    return $batches
 }
 
 function Get-FFMpegArgs {
     param(
-        [string]$Overlay,
         [string]$OutputName,
         [string]$FFprobePath
     )
 
-    $overlayPath = if ($Overlay) { (Get-Item $Overlay).FullName } else { $null }
+
     $ffmpegArgs = $null
 
-    if ($overlayPath) {
-        Write-Host "Calculating video durations for overlay placement..." -ForegroundColor Cyan
 
-        # Step 1: Safely fetch the total duration of your merged temp video
-        $tempDurationOutput = & $FFprobePath -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 temp.mkv
-        [double]$tempDuration = [double]$tempDurationOutput
-
-        # Step 2: Safely fetch the total duration of the overlay asset
-        $overlayDurationOutput = & $FFprobePath -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$overlayPath"
-        [double]$overlayDuration = [double]$overlayDurationOutput
-
-        # Step 3: Compute the exact start timestamp 
-        $startAtSecond = $tempDuration - $overlayDuration
-
-        Write-Host "Overlay will push forward and start at: $startAtSecond seconds." -ForegroundColor Yellow
-
-        # Step 4: Key out the black background ('0x000000') before the overlay step
-        $ffmpegArgs = "-i temp.mkv -i `"$overlayPath`" -filter_complex `"[1:v] chromakey=0x000000:0.1:0.1,setpts=PTS+$startAtSecond/TB [ovtrk]; [0:v][ovtrk] overlay=0:0:enable='gte(t,$startAtSecond)'`" -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$OutputName`""
-    } 
-    else {
-        $ffmpegArgs = "-i temp.mkv -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$OutputName`""
-    }
+    $ffmpegArgs = "-i temp.mkv -c:v h264_nvenc -preset p5 -rc vbr -cq 19 -c:a copy `"$OutputName`""
 
     return $ffmpegArgs
 }
@@ -197,16 +185,25 @@ $ffprobe = "ffprobe.exe"
 $transitionTyp = $TransitionType
 
 ### Validate Intro/Outro paths if provided
-if ($Intro -and !(Test-Path $Intro)) { Write-Host "Intro file not found: $Intro" -ForegroundColor Red; exit 1}
-if ($Outro -and !(Test-Path $Outro)) { Write-Host "Outro file not found: $Outro" -ForegroundColor Red; exit 2}
-if ($Overlay -and !(Test-Path $Overlay)) { Write-Host "Overlay file not found: $Overlay" -ForegroundColor Red; exit 2}
 
 
+if ($IntroPath -and !(Test-Path $IntroPath)) { Write-Host "Intro Folder not valid: $IntroPath" -ForegroundColor Red; exit 1}
+if ($OutroPath -and !(Test-Path $OutroPath)) { Write-Host "Outro Folder not found: $OutroPath" -ForegroundColor Red; exit 2}
+
+#Get List of clips from the $IntroPath folder
+if ($IntroPath -and (Test-Path $IntroPath)) 
+{
+    $IntroList = Get-ChildItem -Path $IntroPath -File | Where-Object { $_.Extension -in ".mp4", ".mkv" } | Sort-Object Name
+}
+
+if ($OutroPath -and (Test-Path $OutroPath)) 
+{ 
+    $OutroList = Get-ChildItem -Path $OutroPath -File | Where-Object { $_.Extension -in ".mp4", ".mkv" } | Sort-Object Name
+}
 
 
 ### Identify raw clips
 $sourceFiles = Get-Sorted-List -SortBy $SortBy
-
 
 $totalClips = $sourceFiles.Count
 if ($totalClips -eq 0) { 
@@ -214,62 +211,58 @@ if ($totalClips -eq 0) {
     exit 3
 }
 
-
-
-
-# ---  CHUNK & MANIFEST GENERATION ---
-if ($ChunkSize -le 0) { 
-    $ChunkSize = $totalClips 
+# Fallback scenario: if MaxBatchDuration is configured to 0 or less, bundle all clips into an arbitrarily massive window
+if ($MaxBatchDurationSeconds -le 0) { 
+    $FullClip = $true
 }
 
-
-
-
-
-### Use source files directly (no normalization)
-#if $Random is on, shuffle these $sourceFiles into a randomized order
-#ignore $Random if chunksize < 2
-if ($Random)
-{
-    #shuffle these $sourceFiles into a randomized order and place into $normalizedFiles
-   $normalizedFiles = Shuffle($sourceFiles)
+### Use source files directly (handle randomization shuffling)
+if ($Random) {
+    $normalizedFiles = Shuffle($sourceFiles)
 }
 else {
-   $normalizedFiles = $sourceFiles
+    $normalizedFiles = $sourceFiles
 }
 
+# --- GENERATE TIME-BASED BATCHES ---
+$batches = Build-TimeBatches -Files $normalizedFiles -MaxSeconds $MaxBatchDurationSeconds -full_clip $FullClip
 
 
-$numBatches = [Math]::Ceiling($totalClips / $ChunkSize)
 
-for ($b = 0; $b -lt $numBatches; $b++) {
+for ($b = 0; $b -lt $batches.Count; $b++) {
     $batchNum = ($b + 1).ToString("D2")
     $batchFile = "batch_$batchNum.txt"
-    $startIndex = $b * $ChunkSize
-    $currentBatchClips = $normalizedFiles | Select-Object -Skip $startIndex -First $ChunkSize
+    $currentBatchClips = $batches[$b]
     
     $lines = @()
 
     # Insert Intro if defined
-    if ($Intro) { $lines += (Get-Item $Intro).FullName }
-    
+    #prepend the list of intro clips
+    foreach($i in $IntroList)
+    {
+        $lines += $i.FullName
+    }
+
     # ADDING MAIN CLIPS
     foreach ($clip in $currentBatchClips) { $lines += $clip.FullName }
 
     # Append Outro if defined
-    if ($Outro) { $lines += (Get-Item $Outro).FullName }
+    foreach($o in $OutroList)
+    {
+        $lines += $o.FullName
+    }
+
 
     $lines | Set-Content $batchFile
-    Write-Host "Created $batchFile with $($lines.Count) entries." -ForegroundColor Blue
+    Write-Host "Created $batchFile with $($currentBatchClips.Count) core clips." -ForegroundColor Blue
 }
 
-# ---  USER VERIFICATION ---
+# --- USER VERIFICATION ---
 Write-Host "`n--- QUEUE READY FOR INSPECTION ---" -ForegroundColor Cyan
 Get-ChildItem -Path "batch_*.txt" | Select-Object -Property Name
 
 [double]$displayDur = $transitionDur;
-if($transitionTyp -eq "cut")
-{
+if($transitionTyp -eq "cut") {
     $displayDur = 0.0
 }
 Write-Host "`nTransition: $transitionTyp ($($displayDur)s)" -ForegroundColor Yellow
@@ -281,7 +274,6 @@ $manifests = Get-ChildItem "batch_*.txt" | Sort-Object Name
 # Path to the luma assets based on your directory listing
 $lumaRepo = "C:\\Program Files\\kdenlive\\bin\\data\\kdenlive\\lumas\\HD"
 
-
 #############################
 # --- MAIN LOOP ---
 ##############################
@@ -289,19 +281,18 @@ foreach ($file in $manifests) {
     $inputFiles = Get-Content $file.FullName
     if ($inputFiles.Count -eq 0) { continue }
 
-   # Convert transition duration (seconds -> frames)
+    # Convert transition duration (seconds -> frames)
     # --- 1. PROBE FIRST CLIP FOR FPS ---
     $firstClip = $inputFiles[0]
     $fps = Get-VideoFPS -FilePath $firstClip
 
-   
     # Round to nearest whole number for the Melt Profile name if needed, 
     # but keep the decimal for frame math.
     $roundedFps = [Math]::Round($fps)
     Write-Host "Detected FPS: $fps (Using $roundedFps for Profile)" -ForegroundColor Cyan
 
     $mixFrames = [int]($transitionDur * $fps)  
-    $trimFrames = [int]($TrimFront * $fps)
+
 
     $batchNum = $file.Name.Replace("batch_","").Replace(".txt","")
 
@@ -311,51 +302,22 @@ foreach ($file in $manifests) {
 
     $meltArgs = @()
 
-    $introPath = if ($Intro) { (Get-Item $Intro).FullName } else { $null }
-    $outroPath = if ($Outro) { (Get-Item $Outro).FullName } else { $null }
-
     for ($i = 0; $i -lt $inputFiles.Count; $i++) {
         $clip = $inputFiles[$i]
 
-        $isIntro = ($clip -eq $introPath)
-        $isOutro = ($clip -eq $outroPath)
-
-        $useTrim = $false
-
-        if ($TrimFront -gt 0 -and -not $isIntro -and -not $isOutro) {
-
-            $durationOutput = & $ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $clip
-            $duration = [double]$durationOutput
-
-            if ($TrimFront -lt $duration) {
-                $useTrim = $true
-            } else {
-                Write-Host "Trim exceeds clip length, using full clip: $clip" -ForegroundColor DarkYellow
-            }
-        }
-
-        if ($useTrim) {
-            $meltArgs += "`"$clip`""
-            $meltArgs += "in=$trimFrames"
-        } else {
-            $meltArgs += "`"$clip`""
-        }
+        $meltArgs += "`"$clip`""
 
         if ($i -gt 0) {
 
-            if($isOutro){ continue }
-
             switch ($transitionTyp) {
-
                 "cut" {
-                    #do nothing, just pass thru the clip
+                    # do nothing, just pass thru the clip
                 }
                 "mix" {
                     # Standard dissolve
                     $meltArgs += "-mix"
                     $meltArgs += "$mixFrames"
                 }
-
                 "luma" {
                     # Smooth fade
                     $meltArgs += "-mix"
@@ -363,9 +325,8 @@ foreach ($file in $manifests) {
                     $meltArgs += "-mixer"
                     $meltArgs += "luma"
                 }
-
                 "wipeh" {
-					# A geometric wipe using a PGM resource
+                    # A geometric wipe using a PGM resource
                     $pattern = Join-Path $lumaRepo "bi-linear_x.pgm"
                     $meltArgs += "-mix"
                     $meltArgs += "$mixFrames"
@@ -373,9 +334,8 @@ foreach ($file in $manifests) {
                     $meltArgs += "luma"
                     $meltArgs += "resource=`"$pattern`""
                 }
-
                 "wipev" {
-					# A geometric wipe using a PGM resource
+                    # A geometric wipe using a PGM resource
                     $pattern = Join-Path $lumaRepo "bi-linear_y.pgm"
                     $meltArgs += "-mix"
                     $meltArgs += "$mixFrames"
@@ -400,42 +360,34 @@ foreach ($file in $manifests) {
 
     $meltArgs += "-silent"
 
-
     $meltProcess = Start-Process -FilePath $melt -ArgumentList $meltArgs -Wait -NoNewWindow -PassThru
 
     if ($meltProcess.ExitCode -ne 0) {
         Write-Host "MELT had a meltdown. " -ForegroundColor RED -BackgroundColor White
-        write-Host "---------`$meltArgs---------------" -ForegroundColor GREEN -BackgroundColor BLACK
-        write-Host "$meltArgs" -ForegroundColor GREEN -BackgroundColor BLACK
-        write-Host "-----------------------------------" -ForegroundColor GREEN -BackgroundColor BLACK
+        Write-Host "---------`$meltArgs---------------" -ForegroundColor GREEN -BackgroundColor BLACK
+        Write-Host "$meltArgs" -ForegroundColor GREEN -BackgroundColor BLACK
+        Write-Host "-----------------------------------" -ForegroundColor GREEN -BackgroundColor BLACK
         exit 4
     }
-
-
 
     $outputName = "final_output_$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss')).mp4"
     Write-Host "Encoding batch $batchNum to $outputName using MELT..." -ForegroundColor Yellow
     
-    $ffmpegArgs = Get-FFMpegArgs -Overlay $Overlay -OutputName $outputName -FFprobePath $ffprobe
+    $ffmpegArgs = Get-FFMpegArgs -OutputName $outputName -FFprobePath $ffprobe
 
     $ffmpegProcess = Start-Process -FilePath $ffmpeg -ArgumentList $ffmpegArgs -Wait -NoNewWindow -PassThru
 
-
-
-    ###########################################################################################################
-    
     if ($ffmpegProcess.ExitCode -ne 0) {
         Write-Host "FFMPEG failed. " -ForegroundColor Magenta -BackgroundColor White
         exit 5
     }
 
-     ##call vsign.ps1
-     $signedFileName = Publish-Video -FullName $outputName -Title $Title -artist "James Barrett"
-        # Check if the signed file exists using Test-Path
-        if (Test-Path -Path $signedFileName){
-            Remove-Item -Path $outputName
-        }
-
+    ## call vsign.ps1
+    $signedFileName = Publish-Video -FullName $outputName -Title $Title -artist "James Barrett"
+    # Check if the signed file exists using Test-Path
+    if (Test-Path -Path $signedFileName){
+        Remove-Item -Path $outputName
+    }
 }
 
 Write-Host "`nALL DONE! Check your final_output files." -ForegroundColor Green

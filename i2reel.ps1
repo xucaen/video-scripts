@@ -1,15 +1,14 @@
 #i2reel.ps1
 ###Image To Reel
-##this script takes all images in currect directory
+##this script takes all images in current directory
 ##and turns them into reels
-
 
 param (
     [int]$FPS = 60,
-    [int]$DesiredLengthInSeconds = 15,
+    [int]$DefaultLengthInSeconds = 15, # Used as a fallback if no audio is present
 
-    [string]$Music = "",
-    [string]$voice = ""
+    [string]$AudioPerClip,
+    [switch]$RandomAudio = $false
 )
 
 $env:FFREPORT = "file=ffmpeg_crash_log.txt:level=32"
@@ -20,16 +19,21 @@ $env:HOME = $PSScriptRoot
 # External Scripts & Tools
 $SignScript = Join-Path $PSScriptRoot "vsign.ps1"
 $ffmpeg = "ffmpeg.exe"
+$ffprobe = "ffprobe.exe" # Added for probing audio length
 $magick = "magick.exe"
 $OutputDir = "."
 
 . $SignScript
 
 # Music Setup
-$MusicFiles = @()
-$MusicIndex = 0
-if (![string]::IsNullOrWhiteSpace($Music) -and (Test-Path $Music)) {
-    $MusicFiles = Get-ChildItem -Path $Music -File -Recurse | Where-Object { $_.Extension -match '\.(mp3|wav|m4a|aac|flac)$' } | Sort-Object { Get-Random }
+$AudioPerClipFiles = @()
+$AudioPerClipIndex = 0
+if (![string]::IsNullOrWhiteSpace($AudioPerClip) -and (Test-Path $AudioPerClip)) {
+    $AudioPerClipFiles = Get-ChildItem -Path $AudioPerClip -File -Recurse | Where-Object { $_.Extension -match '\.(mp3|wav|m4a|aac|flac)$' } 
+    
+    if($RandomAudio){
+        $AudioPerClipFiles  = $AudioPerClipFiles | Sort-Object { Get-Random }
+    }
 }
 
 # --- STEP 1: GET ALL IMAGE FILES IN CURRENT DIRECTORY ---
@@ -65,14 +69,32 @@ foreach ($SourceImage in $ImageFiles) {
     
     Write-Host "Detected Dimensions: ${ImgWidth}x${ImgHeight}" -ForegroundColor Magenta
 
-    # --- STEP 4: AUDIO SETUP ---
+    # --- STEP 4: AUDIO SETUP & DYNAMIC LENGTH CALCULATION ---
     $audioArgs = @()
     $hasAudio = $false
-    if ($MusicFiles.Count -gt 0) {
-        $CurrentMusic = $MusicFiles[$MusicIndex].FullName
-        $audioArgs = @("-stream_loop", "-1", "-i", $CurrentMusic)
+    $DesiredLengthInSeconds = $DefaultLengthInSeconds # Default fallback
+
+    if ($AudioPerClipFiles.Count -gt 0) {
+        $CurrentMusic = $AudioPerClipFiles[$AudioPerClipIndex].FullName
+        Write-Host "Analyzing audio duration for: $($AudioPerClipFiles[$AudioPerClipIndex].Name)" -ForegroundColor Green
+        
+        # Call ffprobe to fetch raw duration in seconds
+        $RawDuration = & $ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $CurrentMusic
+        
+        if ($LASTEXITCODE -eq 0 -and ![string]::IsNullOrWhiteSpace($RawDuration)) {
+            # Ceiling math ensures we round up to the nearest whole second so audio doesn't get clipped
+            $DesiredLengthInSeconds = [Math]::Ceiling([double]$RawDuration)
+            Write-Host "Dynamic video length set to match audio: $DesiredLengthInSeconds seconds" -ForegroundColor Green
+        } else {
+            Write-Warning "Failed to read audio duration. Falling back to default ($DefaultLengthInSeconds seconds)."
+        }
+
+        # Removed "-stream_loop -1" since the video length now matches the audio duration perfectly
+        $audioArgs = @("-i", $CurrentMusic)
         $hasAudio = $true
-        $MusicIndex = ($MusicIndex + 1) % $MusicFiles.Count
+        $AudioPerClipIndex = ($AudioPerClipIndex + 1) % $AudioPerClipFiles.Count
+    } else {
+        Write-Host "No audio files available. Using default length: $DesiredLengthInSeconds seconds" -ForegroundColor Yellow
     }
 
     # --- STEP 5: FINAL RENDER ---
@@ -80,13 +102,11 @@ foreach ($SourceImage in $ImageFiles) {
 
     $totalframes = $FPS * $DesiredLengthInSeconds
 
-
     $inputs = @("-y", "-framerate", $FPS, "-loop", "1", "-t", $DesiredLengthInSeconds, "-i", $ImageFrameFile)
 
     if ($hasAudio) {
         $inputs += $audioArgs
     }
-
 
     [double]$Speed = 3.0         
     [double]$zoomFactor = 0.0001
@@ -98,8 +118,7 @@ foreach ($SourceImage in $ImageFiles) {
 
     $zoompanfilter = "zoompan=z='1.0+(on*$Speed*$zoomFactor)':x='$VectorX*(1-1/zoom)':y='$VectorY*(1-1/zoom)':d=1:s=${ImgWidth}x${ImgHeight}:fps=$FPS,scale=${ImgWidth}:${ImgHeight}:flags=bicubic"
 
-    # 3. Use NVENC for the actual encoding step. 
-    # Leaving the video encoding to your GPU saves massive amounts of overhead, pushing you back up to top speed.
+    # Use NVENC for the actual encoding step. 
     $ffmpegArgs = $inputs + @(
         "-vf", $zoompanfilter,
         "-c:v", "h264_nvenc",      # Blazing fast hardware encoder
@@ -118,7 +137,6 @@ foreach ($SourceImage in $ImageFiles) {
     }
 
     $ffmpegArgs += @(
-    
         "-g", ($FPS * 2),                  # Keeps seeking efficient
         "-forced-idr", "1",                # Forces strict hardware IDR frames for faster encoding
         $mp4Output
@@ -131,14 +149,6 @@ foreach ($SourceImage in $ImageFiles) {
         Write-Error "FFmpeg reported success, but $mp4Output is missing!"
         exit 1
     }
-
-
-
-
-
-
-
-
 
     # --- STEP 6: PUBLISH & CLEANUP ---
     $NewFile = Publish-Video -FullName $mp4Output -Title "Video $count" -artist "James Barrett"
