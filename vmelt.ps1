@@ -357,6 +357,8 @@ foreach ($file in $manifests) {
     $meltArgs += "vcodec=libx264"
     $meltArgs += "crf=0"
     $meltArgs += "acodec=aac"
+    $meltArgs += "ab=192k"        # Explicitly set Melt's audio bitrate
+    $meltArgs += "ar=48000"       # Force Melt to mix down everything to 48kHz
 
     $meltArgs += "-silent"
 
