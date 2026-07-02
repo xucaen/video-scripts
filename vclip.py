@@ -15,7 +15,6 @@ RESET = "\033[0m"
 
 # Global state configuration to support the strict single-argument signature
 VoiceAudioTrack = 1
-GameAudioTrack = 2
 
 def parse_arguments():
     """
@@ -25,26 +24,12 @@ def parse_arguments():
     
     parser.add_argument("--VoiceAudioTrack", type=int, default=1, 
                         help="The explicit audio track index FFmpeg will monitor for voice activity.")
-    parser.add_argument("--GameAudioTrack", type=int, default=0, 
-                        help="The explicit audio track index containing gameplay sounds for B-roll validation.")
     parser.add_argument("-db", "--DecibleThreshold", type=int, default=-30, 
-                        help="The decibel limit below which audio is classified as absolute silence.")
-    parser.add_argument("-m", "--MaxClipLength", type=float, default=None, 
-                        help="The MAX runtime required for a non-silent region to be saved. Only use this if you want very short clips. Must be at least 2 seconds. If infinite or null or whatever, just do whatever we did before. ")
-    parser.add_argument("-sl", "--SilenceLength", type=float, default=1.5, 
+                        help="The decibel limit below which audio is classified as absolute loudness.")
+    parser.add_argument("-sl", "--LoudnessLength", type=float, default=1.5, 
                         help="The minimum duration of quiet time required to trigger a clip split.")
     
     return parser.parse_args()
-
-def get_audio_mode(audioTrack):
-    if audioTrack == VoiceAudioTrack:
-        return "voice"
-    elif audioTrack == GameAudioTrack:
-        return "game"
-    elif audioTrack == 0:
-        return "combined"
-    
-    return "none"
 
 
 def get_video_metadata(input_video):
@@ -94,19 +79,16 @@ def convert_to_seconds(time_value):
     return float(time_str)
 
 
-def detect_silence(decibel_threshold, silence_length, min_clip_length):
+def detect_loudness(decibel_threshold, loudness_length, min_clip_length):
     """
     Scans local directory for video assets and cross-analyzes voice signals with exciting gameplay cues.
     """
     print(f"{CYAN}\n--------------------------------------------------")
-    print(" [Detect-Silence Configuration]")
+    print(" [Detect-Loudness Configuration]")
     print(f"  -> Voice Audio Track     : {YELLOW}{VoiceAudioTrack}{RESET}")
-    print(f"  -> Game Audio Track      : {YELLOW}{GameAudioTrack}{RESET}")
     print(f"  -> Volume Threshold      : {YELLOW}{decibel_threshold} dB{RESET}")
-    print(f"  -> Min Silence Duration  : {YELLOW}{silence_length} seconds{RESET}")
+    print(f"  -> Min Loudness Duration  : {YELLOW}{loudness_length} seconds{RESET}")
     print(f"  -> Target Min Clip Length: {YELLOW}{min_clip_length} seconds.{RESET}")
-    if max_clip_length:
-        print(f"  -> Target Max Clip Length: {YELLOW}{max_clip_length} seconds.{RESET}")
     print(f"{CYAN}--------------------------------------------------{RESET}")
 
     video_extensions = ("*.mp4", "*.mkv", "*.mov", "*.avi")
@@ -136,25 +118,25 @@ def detect_silence(decibel_threshold, silence_length, min_clip_length):
 
         ffmpeg_args = [
             "ffmpeg", "-i", file_path,
-            "-filter_complex", f"[0:a:{VoiceAudioTrack}]silencedetect=noise={decibel_threshold}dB:d={silence_length}",
+            "-filter_complex", f"[0:a:{VoiceAudioTrack}]loudnessdetect=noise={decibel_threshold}dB:d={loudness_length}",
             "-f", "null", "-"
         ]
 
         result = subprocess.run(ffmpeg_args, stderr=subprocess.PIPE, text=True)
         ffmpeg_logs = result.stderr
 
-        silence_matches = re.finditer(r'silence_start:\s*(?P<start>[\d\.]+)|silence_end:\s*(?P<end>[\d\.]+)', ffmpeg_logs)
+        loudness_matches = re.finditer(r'loudness_start:\s*(?P<start>[\d\.]+)|loudness_end:\s*(?P<end>[\d\.]+)', ffmpeg_logs)
 
         voice_segments = []
         raw_segments = []
         current_start = 0.0
 
-        for match in silence_matches:
+        for match in loudness_matches:
             if match.group('start'):
-                silence_start = float(match.group('start'))
-                if silence_start > current_start:
-                    if (silence_start - current_start) >= min_clip_length:
-                        raw_segments.append((current_start, silence_start))
+                loudness_start = float(match.group('start'))
+                if loudness_start > current_start:
+                    if (loudness_start - current_start) >= min_clip_length:
+                        raw_segments.append((current_start, loudness_start))
             elif match.group('end'):
                 current_start = float(match.group('end'))
 
@@ -165,17 +147,7 @@ def detect_silence(decibel_threshold, silence_length, min_clip_length):
         # enforce max_clip_length constraints by chunking oversized segments
         
         for start, end in raw_segments:
-            seg_duration = end - start
-            if max_clip_length and seg_duration > max_clip_length:
-                temp_start = start
-                while temp_start < end:
-                    temp_end = min(end, temp_start + max_clip_length)
-                    # Keep chunk if it matches minimum runtime threshold
-                    if (temp_end - temp_start) >= min_clip_length:
-                        voice_segments.append((temp_start, temp_end))
-                    temp_start = temp_end
-            else:
-                voice_segments.append((start, end))
+            voice_segments.append((start, end))
 
            
         if not voice_segments:
@@ -235,15 +207,13 @@ def process_clips(clips):
 
             # Evaluate exact production labels dynamically using the requested signature
             track_id = row.get("Track", 1)
-            audio_mode = get_audio_mode(track_id)
 
             # --- EXPLICIT REQUIRED FILENAME MATRIX ---
-            output_file = f"{base_name}_Clip_{starttime_clean}_{endtime_clean}_{audio_mode}{extension}"
+            output_file = f"{base_name}_Clip_{starttime_clean}_{endtime_clean}{extension}"
 
             print(f"{CYAN}\n--- Processing Clip #{clip_number} ---")
             print(f"{RESET}Source: {input_file} ({fps} fps)")
             print(f"Range:  {starttime} ({frame_start}) to {endtime} ({frame_end})")
-            print(f"Mode:   {audio_mode.upper()}")
             print(f"Output: {output_file}")
 
             ffmpeg_slice_args = [
@@ -282,13 +252,12 @@ def main():
 
    
     # global  mappings 
-    global VoiceAudioTrack, GameAudioTrack
+    global VoiceAudioTrack
     VoiceAudioTrack = args.VoiceAudioTrack
-    GameAudioTrack = args.GameAudioTrack
 
-    clips = detect_silence(
+    clips = detect_loudness(
         decibel_threshold=args.DecibleThreshold,
-        silence_length=args.SilenceLength,
+        loudness_length=args.LoudnessLength,
         min_clip_length=args.MinClipLength
     )
 
