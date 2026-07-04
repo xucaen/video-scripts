@@ -13,9 +13,12 @@ AUDIO_WEIGHT = 0.3
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Multi-Signal Slicer with Aspect-Correct Render Engine")
     parser.add_argument("--InputFile", type=str, required=True, help="Path to the single input video file to process")
-    parser.add_argument("--x", type=int, required=True, help="Search Window Start X Coordinate")
-    parser.add_argument("--y", type=int, required=True, help="Search Window Start Y Coordinate")
+    parser.add_argument("--x", type=int, required=True, help="Start X Coordinate")
+    parser.add_argument("--y", type=int, required=True, help="Start Y Coordinate")
+    parser.add_argument("--l", type=int, required=True, help="If video is 9:16 vertical, then l represents the width and script will calculate height if video is 16:9 horizontal, then l represents the height and script will calculate width.")
     parser.add_argument("--label", type=str, default="", help="Label to append to output file")
+
+
 
     return parser.parse_args()
 

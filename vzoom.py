@@ -50,7 +50,7 @@ def main():
     
     if not os.path.exists(args.InputFile):
         print(f"❌ Error: Input file '{args.InputFile}' not found.")
-        return
+        exit(2)
 
     # Fetch video dimensions
     cap = cv2.VideoCapture(args.InputFile)
