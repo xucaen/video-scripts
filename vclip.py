@@ -102,8 +102,8 @@ def detect_loudness(decibel_threshold, min_clip_duration, VoiceAudioTrack, file_
         exit(4)
 
     # NEW: We need a reasonable pause duration to separate talk blocks. 
-    # If a pause is longer than 1.5 seconds, we split the clip.
-    silence_gap_threshold = 1.5 
+    # If a pause is longer than this many seconds, we split the clip.
+    silence_gap_threshold = 0.9
 
     # Force FFmpeg to execute the filter chain using our gap threshold, NOT the final clip duration
     ffmpeg_args = [
